@@ -1,0 +1,45 @@
+services:
+
+  mysql:
+    image: mysql:8
+    container_name: docs_mysql
+    restart: no
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: docs_gateway_db
+    # Host port 3308: notification-api binds 3306 and realtime-chat-platform binds
+    # 3307. All three learning projects should run side by side.
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Applied in alphabetical order, and ONLY when the data directory is empty.
+      # Database per service: one container, one schema file per deployable.
+      # Adding a file later (03-notification in month 5, 04-publish in month 6)
+      # does not re-run initdb; apply it to the live volume instead:
+      #   docker exec -i docs_mysql mysql -uroot -proot < db/<file>.sql
+      - ./db/gateway_schema.sql:/docker-entrypoint-initdb.d/01-gateway.sql
+      - ./db/doc_schema.sql:/docker-entrypoint-initdb.d/02-doc.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: docs_redis
+    restart: no
+    # Host port 6381: 6379 (notification-api) and 6380 (realtime-chat-platform)
+    # are taken by the siblings. Redis is unused until month 4 (caching + rate
+    # limiting); the port is claimed now so nothing else grabs it.
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:

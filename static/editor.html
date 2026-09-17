@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collab Docs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 14px; color: #1a1a1a; }
+  body { margin: 0; background: #f4f4f4; }
+  header { background: #222; color: #fff; padding: 10px 16px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  header .who { opacity: .85; }
+  main { display: grid; grid-template-columns: 280px 1fr 260px; gap: 12px; padding: 12px; max-width: 1300px; margin: 0 auto; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 12px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #555; margin: 0 0 10px; }
+  input, select, button, textarea { font: inherit; }
+  input, select { padding: 5px 7px; border: 1px solid #bbb; border-radius: 3px; }
+  button { padding: 5px 10px; border: 1px solid #888; background: #fafafa; border-radius: 3px; cursor: pointer; }
+  button:hover { background: #eee; }
+  button.danger { border-color: #b33; color: #b33; }
+  form.row, .row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  form.row input { flex: 1; min-width: 80px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  #docs li { padding: 6px 8px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+  #docs li:hover, #docs li.active { background: #eef3ff; }
+  #docs li .role { color: #777; font-size: 12px; }
+  #members li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #eee; }
+  #members li .uid { flex: 1; }
+  textarea { width: 100%; box-sizing: border-box; height: 60vh; padding: 10px; border: 1px solid #bbb; border-radius: 3px; resize: vertical; background: #fafafa; }
+  #title { font-size: 16px; font-weight: 600; flex: 1; }
+  .meta { color: #777; font-size: 12px; margin-bottom: 8px; }
+  #status { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; font-size: 12px; background: #fff8e1; border-top: 1px solid #e0c97a; display: none; }
+  #status.error { background: #fdecea; border-color: #e0938d; }
+  .hidden { display: none !important; }
+  #auth { grid-column: 1 / -1; max-width: 420px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Collab Docs</h1>
+  <span class="who" id="who"></span>
+  <button id="logout" class="hidden">Log out</button>
+</header>
+
+<main>
+  <section id="auth">
+    <h2>Sign in</h2>
+    <form class="row" id="authForm">
+      <input id="email" type="email" placeholder="email" required autocomplete="username">
+      <input id="password" type="password" placeholder="password (8+, upper, digit)" required autocomplete="current-password">
+    </form>
+    <div class="row">
+      <button id="login">Log in</button>
+      <button id="register">Register</button>
+    </div>
+  </section>
+
+  <section id="listPane" class="hidden">
+    <h2>Documents</h2>
+    <form class="row" id="createForm">
+      <input id="newTitle" placeholder="new document title" required maxlength="255">
+      <button type="submit">Create</button>
+    </form>
+    <ul id="docs"></ul>
+  </section>
+
+  <section id="editorPane" class="hidden">
+    <div class="row">
+      <input id="title" disabled>
+      <button id="rename" class="hidden">Rename</button>
+      <button id="delete" class="danger hidden">Delete</button>
+    </div>
+    <div class="meta" id="docMeta"></div>
+    <!-- Read-only in month 1. Month 2 turns this into the OT client. -->
+    <textarea id="content" disabled placeholder="(empty document — live editing arrives in month 2)"></textarea>
+  </section>
+
+  <section id="membersPane" class="hidden">
+    <h2>Members</h2>
+    <ul id="members"></ul>
+    <form class="row hidden" id="shareForm">
+      <input id="shareUserId" type="number" min="1" placeholder="user id" required>
+      <select id="shareRole"><option value="viewer">viewer</option><option value="editor">editor</option></select>
+      <button type="submit">Share</button>
+    </form>
+  </section>
+</main>
+
+<div id="status"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { token: localStorage.getItem('token'), me: null, doc: null };
+
+  // ---- HTTP -----------------------------------------------------------
+  // Every call goes through the gateway on this origin. The token is a
+  // Bearer header, never a query string; the gateway turns it into
+  // X-User-ID for the backend.
+  async function api(method, path, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (res.status === 204) return null;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401 && state.token && path !== '/login') logout('session expired, log in again');
+      throw new Error(data.error || `${res.status} ${res.statusText}`);
+    }
+    return data;
+  }
+
+  function status(msg, isError) {
+    const el = $('status');
+    el.textContent = msg; el.className = isError ? 'error' : ''; el.style.display = msg ? 'block' : 'none';
+    if (msg) setTimeout(() => { if (el.textContent === msg) el.style.display = 'none'; }, 4000);
+  }
+  const fail = (e) => status(e.message, true);
+
+  // ---- Auth -----------------------------------------------------------
+  function creds() { return { email: $('email').value.trim(), password: $('password').value }; }
+
+  $('register').onclick = async () => {
+    try {
+      const u = await api('POST', '/register', creds());
+      status(`registered as user ${u.id}; now log in`);
+    } catch (e) { fail(e); }
+  };
+  $('login').onclick = async () => {
+    try {
+      const { token } = await api('POST', '/login', creds());
+      state.token = token; localStorage.setItem('token', token);
+      await boot();
+    } catch (e) { fail(e); }
+  };
+  $('authForm').onsubmit = (ev) => { ev.preventDefault(); $('login').click(); };
+  $('logout').onclick = () => logout();
+
+  function logout(msg) {
+    state.token = null; state.me = null; state.doc = null;
+    localStorage.removeItem('token');
+    show(false);
+    if (msg) status(msg, true);
+  }
+
+  function show(loggedIn) {
+    $('auth').classList.toggle('hidden', loggedIn);
+    $('listPane').classList.toggle('hidden', !loggedIn);
+    $('logout').classList.toggle('hidden', !loggedIn);
+    $('who').textContent = loggedIn ? `${state.me.email} (user ${state.me.id}, ${state.me.role})` : '';
+    if (!loggedIn) { $('editorPane').classList.add('hidden'); $('membersPane').classList.add('hidden'); }
+  }
+
+  async function boot() {
+    if (!state.token) { show(false); return; }
+    try {
+      state.me = await api('GET', '/me');
+      show(true);
+      await loadDocs();
+    } catch (e) { logout(e.message); }
+  }
+
+  // ---- Documents ------------------------------------------------------
+  async function loadDocs() {
+    const docs = await api('GET', '/documents');
+    const ul = $('docs'); ul.innerHTML = '';
+    for (const d of docs) {
+      const li = document.createElement('li');
+      li.dataset.id = d.id;
+      li.innerHTML = `<span></span><span class="role"></span>`;
+      li.firstChild.textContent = d.title;
+      li.lastChild.textContent = `${d.role} · v${d.version}`;
+      li.onclick = () => openDoc(d.id);
+      if (state.doc && state.doc.id === d.id) li.classList.add('active');
+      ul.appendChild(li);
+    }
+    if (docs.length === 0) ul.innerHTML = '<li style="cursor:default;color:#777">no documents yet</li>';
+  }
+
+  $('createForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      const d = await api('POST', '/documents', { title: $('newTitle').value });
+      $('newTitle').value = '';
+      await loadDocs();
+      await openDoc(d.id);
+    } catch (e) { fail(e); }
+  };
+
+  async function openDoc(id) {
+    try {
+      state.doc = await api('GET', `/documents/${id}`);
+      renderDoc();
+      await loadDocs();
+    } catch (e) { fail(e); }
+  }
+
+  function renderDoc() {
+    const d = state.doc;
+    const canEdit = d.role === 'owner' || d.role === 'editor';
+    const isOwner = d.role === 'owner';
+    $('editorPane').classList.remove('hidden');
+    $('membersPane').classList.remove('hidden');
+    $('title').value = d.title;
+    $('title').disabled = !canEdit;
+    $('rename').classList.toggle('hidden', !canEdit);
+    $('delete').classList.toggle('hidden', !isOwner);
+    $('docMeta').textContent = `document ${d.id} · version ${d.version} · your role: ${d.role} · updated ${new Date(d.updated_at).toLocaleString()}`;
+    $('content').value = d.content;
+    renderMembers();
+  }
+
+  $('rename').onclick = async () => {
+    try {
+      const d = await api('PATCH', `/documents/${state.doc.id}`, { title: $('title').value });
+      state.doc.title = d.title; state.doc.updated_at = d.updated_at;
+      renderDoc(); await loadDocs(); status('renamed');
+    } catch (e) { fail(e); }
+  };
+
+  $('delete').onclick = async () => {
+    // No confirm(): a modal would block automation and this is a learning project.
+    try {
+      await api('DELETE', `/documents/${state.doc.id}`);
+      state.doc = null;
+      $('editorPane').classList.add('hidden'); $('membersPane').classList.add('hidden');
+      await loadDocs(); status('deleted');
+    } catch (e) { fail(e); }
+  };
+
+  // ---- Members --------------------------------------------------------
+  function renderMembers() {
+    const d = state.doc;
+    const isOwner = d.role === 'owner';
+    $('shareForm').classList.toggle('hidden', !isOwner);
+    const ul = $('members'); ul.innerHTML = '';
+    for (const m of d.members) {
+      const li = document.createElement('li');
+      const uid = document.createElement('span'); uid.className = 'uid';
+      uid.textContent = `user ${m.user_id}` + (m.user_id === state.me.id ? ' (you)' : '');
+      li.appendChild(uid);
+      if (isOwner && m.role !== 'owner') {
+        const sel = document.createElement('select');
+        for (const r of ['viewer', 'editor']) { const o = new Option(r, r, false, r === m.role); sel.add(o); }
+        sel.onchange = () => setMember(m.user_id, sel.value);
+        li.appendChild(sel);
+        const rm = document.createElement('button'); rm.textContent = '×'; rm.className = 'danger'; rm.title = 'remove';
+        rm.onclick = () => removeMember(m.user_id);
+        li.appendChild(rm);
+      } else {
+        const role = document.createElement('span'); role.className = 'role'; role.textContent = m.role;
+        li.appendChild(role);
+      }
+      ul.appendChild(li);
+    }
+  }
+
+  $('shareForm').onsubmit = (ev) => { ev.preventDefault(); setMember(Number($('shareUserId').value), $('shareRole').value); };
+
+  async function setMember(userId, role) {
+    try {
+      await api('PUT', `/documents/${state.doc.id}/members/${userId}`, { role });
+      $('shareUserId').value = '';
+      await openDoc(state.doc.id); status(`user ${userId} is now ${role}`);
+    } catch (e) { fail(e); }
+  }
+
+  async function removeMember(userId) {
+    try {
+      await api('DELETE', `/documents/${state.doc.id}/members/${userId}`);
+      await openDoc(state.doc.id); status(`user ${userId} removed`);
+    } catch (e) { fail(e); }
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

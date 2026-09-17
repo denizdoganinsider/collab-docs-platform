@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>Collab Docs Platform — 6 Aylık Proje Planı</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  html { font-family: -apple-system, "Helvetica Neue", Arial, "Arial Unicode MS", sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; }
+  body { margin: 0; }
+  h1 { font-size: 22pt; margin: 0 0 4pt 0; }
+  h2 { font-size: 15pt; margin: 22pt 0 8pt 0; padding-bottom: 3pt; border-bottom: 1.5px solid #333; page-break-after: avoid; }
+  h3 { font-size: 12pt; margin: 14pt 0 6pt 0; page-break-after: avoid; }
+  h4 { font-size: 10.5pt; margin: 10pt 0 4pt 0; page-break-after: avoid; }
+  p { margin: 0 0 7pt 0; }
+  ul, ol { margin: 0 0 8pt 0; padding-left: 18pt; }
+  li { margin-bottom: 2.5pt; }
+  table { border-collapse: collapse; width: 100%; margin: 6pt 0 10pt 0; font-size: 9.2pt; page-break-inside: auto; }
+  th, td { border: 1px solid #999; padding: 3.5pt 5pt; vertical-align: top; text-align: left; }
+  th { background: #e8e8e8; }
+  tr { page-break-inside: avoid; }
+  code { font-family: Menlo, Monaco, "Courier New", monospace; font-size: 8.8pt; background: #f2f2f2; padding: 0 2pt; }
+  pre { font-family: Menlo, Monaco, "Courier New", monospace; font-size: 8pt; background: #f5f5f5; border: 1px solid #ccc; padding: 6pt; white-space: pre; overflow: hidden; line-height: 1.3; page-break-inside: avoid; }
+  .cover { height: 250mm; display: flex; flex-direction: column; justify-content: center; page-break-after: always; }
+  .cover .sub { font-size: 13pt; color: #444; margin-top: 8pt; }
+  .cover .meta { margin-top: 40pt; font-size: 10.5pt; color: #333; }
+  .cover .meta td { border: none; padding: 2pt 10pt 2pt 0; }
+  .box { border: 1px solid #888; background: #fafafa; padding: 6pt 9pt; margin: 8pt 0 10pt 0; page-break-inside: avoid; }
+  .month { page-break-before: always; }
+  .small { font-size: 9pt; color: #444; }
+  .toc li { margin-bottom: 1.5pt; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <h1>Collab Docs Platform</h1>
+  <div class="sub">Gerçek zamanlı ortak doküman düzenleme sistemi üzerinden dokuz backend sistem tasarımı kavramı</div>
+  <div class="sub">6 Aylık Proje Planı — Ekim 2026 / Mart 2027</div>
+  <table class="meta">
+    <tr><td>Hazırlayan</td><td>Deniz Doğan</td></tr>
+    <tr><td>Tarih</td><td>16 Eylül 2026</td></tr>
+    <tr><td>Durum</td><td>Planlama tamamlandı, Ay 1 hazırlık çalışmaları başladı</td></tr>
+    <tr><td>Depo</td><td><code>~/collab-docs-platform</code> (kaynak doğruluk: <code>README.md</code>)</td></tr>
+    <tr><td>Teknoloji</td><td>Go 1.26, Echo v4, MySQL 8, Redis 7, gorilla/websocket, Docker Compose</td></tr>
+  </table>
+</div>
+
+<h2>İçindekiler</h2>
+<ol class="toc">
+  <li>Projenin amacı ve arka planı</li>
+  <li>Dokuz kavram ve sistemdeki yerleri</li>
+  <li>Neden ortak doküman editörü</li>
+  <li>Hedef mimari</li>
+  <li>Veri modeli</li>
+  <li>API yüzeyi</li>
+  <li>Çakışma çözümü: Operational Transformation (OT)</li>
+  <li>Aylık plan (Ay 1 – Ay 6)</li>
+  <li>Ay sonu ritüeli ve teslim standardı</li>
+  <li>Taşınan mühendislik kuralları</li>
+  <li>Bilinen ödünler ve kapsam dışı konular</li>
+  <li>Riskler ve önlemler</li>
+  <li>Mevcut durum ve sonraki adımlar</li>
+</ol>
+
+<h2>1. Projenin amacı ve arka planı</h2>
+<p>Bu proje, backend sistem tasarımı kavramlarını çalışan bir sistem üzerinden öğrenmeyi amaçlayan üç projelik serinin üçüncüsüdür. Her ay bir kavram kümesi ele alınır ve ay sonunda çalışan, doğrulanabilir bir çıktı üretilir. Önceki iki proje kavramları aralarında paylaşmıştı; bu proje ise kaynak dokümandaki <strong>dokuz kavramın tamamını tek bir sistemde</strong> hayata geçirir.</p>
+
+<table>
+  <tr><th>Proje</th><th>Dönem</th><th>Kapsanan kavramlar</th></tr>
+  <tr><td><code>notification-api</code></td><td>Şubat – Mayıs 2026</td><td>Rate Limiting, Auth &amp; Authorization, Caching (Redis), Webhooks</td></tr>
+  <tr><td><code>realtime-chat-platform</code></td><td>Temmuz – Eylül 2026</td><td>Microservice, Reverse Proxy, WebSocket, Load Balancer, CDN</td></tr>
+  <tr><td><strong><code>collab-docs-platform</code></strong></td><td><strong>Ekim 2026 – Mart 2027</strong></td><td><strong>Dokuz kavramın tamamı</strong></td></tr>
+</table>
+
+<p>Senaryo: birden fazla kullanıcının aynı metin dokümanını aynı anda düzenleyebildiği, dokümanları paylaşabildiği, olayları webhook ile dış sistemlere bildirebildiği ve yayınlanmış sayfaları bir edge cache üzerinden sunabildiği bir platform. Ürün amacı değil öğrenme amacı ön plandadır; her kavramın sistemde <em>doğal</em> bir gerekçesi vardır, hiçbiri liste tamamlamak için eklenmemiştir.</p>
+
+<div class="box">
+<strong>Zaman çizelgesi:</strong> 6 ay, her ay bir kavram kümesi. Ay sonunda README'nin ilgili bölümü "planlanan"dan "yapılan"a çevrilir, doğrulama komutları gerçek çıktılarla güncellenir, <code>go test ./... -race</code> yeşil olur ve tek bir <code>Month N: &lt;özet&gt;</code> commit'i atılır.
+</div>
+
+<h2>2. Dokuz kavram ve sistemdeki yerleri</h2>
+<table>
+  <tr><th>#</th><th>Kavram</th><th>Ay</th><th>Sistemde nerede yaşıyor</th></tr>
+  <tr><td>1</td><td>Rate Limiting</td><td>4</td><td>gateway (HTTP için Redis'te kayan pencere; login brute-force koruması), doc-service (WebSocket op akışında bağlantı başına token bucket)</td></tr>
+  <tr><td>2</td><td>Load Balancer</td><td>3</td><td>gateway <code>internal/loadbalancer</code>: round-robin + doküman id üzerinde consistent hash, sağlık kontrolü</td></tr>
+  <tr><td>3</td><td>Authentication &amp; Authorization</td><td>1</td><td>gateway (JWT, <code>user</code>/<code>admin</code>), doc-service (doküman başına <code>owner</code>/<code>editor</code>/<code>viewer</code> rolleri)</td></tr>
+  <tr><td>4</td><td>Caching (Redis)</td><td>4</td><td>doc-service: kullanıcı başına doküman listesi Redis'te, N instance arasında invalidasyon</td></tr>
+  <tr><td>5</td><td>Microservice</td><td>1</td><td>Dört servis, servis başına veritabanı, ortak sır ama ortak kod yok, kimlik doğrulama kenarda</td></tr>
+  <tr><td>6</td><td>Webhooks</td><td>5</td><td>notification-service (imzalı, yeniden denemeli teslimatlar), doc-service'teki <strong>transactional outbox</strong> ile beslenir</td></tr>
+  <tr><td>7</td><td>Proxy</td><td>1</td><td>gateway (<code>httputil.ReverseProxy</code>), sistemin tek dış giriş noktası</td></tr>
+  <tr><td>8</td><td>WebSocket</td><td>2</td><td>doc-service <code>/ws?doc=</code>: OT operasyon akışı, imleçler, presence</td></tr>
+  <tr><td>9</td><td>CDN</td><td>6</td><td>gateway edge cache, publish-service önünde: değişmez <code>/assets/:sha</code>, değişebilir <code>/p/:slug</code> + <strong>purge</strong></td></tr>
+</table>
+
+<h2>3. Neden ortak doküman editörü</h2>
+<ul>
+  <li><strong>WebSocket zorunlu:</strong> aynı dokümana yazan iki kişi için çift yönlü, düşük gecikmeli kanal gerekir; polling ürünü kullanılamaz kılar.</li>
+  <li><strong>Load balancer + sticky routing doğruluk meselesi:</strong> bir dokümanın operasyon günlüğü tam olarak bir süreç tarafından sıralanır. Chat projesinde odalar için "kolaylık" olan sticky session burada zorunluluktur; iki instance aynı dokümanı sıralarsa doküman bozulur.</li>
+  <li><strong>Yetkilendirme daha zengin:</strong> global <code>user</code>/<code>admin</code> yerine doküman başına roller. Geçerli bir WebSocket tutan <code>viewer</code>, edit gönderdiğinde yine reddedilmelidir.</li>
+  <li><strong>Rate limiting yeni bir şekil alır:</strong> dakikada istek değil, açık bir akışta saniyede operasyon. 5 MB'ı tek op olarak yapıştıran istemci ile 10.000 tek karakterlik op gönderen script aynı problemdir.</li>
+  <li><strong>Caching gerçek bir çapraz-instance invalidasyon problemiyle karşılaşır:</strong> üyeliği değiştiren instance, bir sonraki liste okumasını sunacak instance değildir. Bu, in-process cache yerine Redis'in gerekçesidir.</li>
+  <li><strong>Webhooks tuş vuruşu hızında olay üretir:</strong> bu da <em>coalescing</em> (birleştirme) zorunluluğu getirir. Chat projesinin "teslimat kuyruğu bellekte" ödünü transactional outbox ile yanıtlanır.</li>
+  <li><strong>CDN dersinin iki yarısı da var:</strong> içerik adresli değişmez varlıklar ve doküman başına değişebilir güzel URL, yani <strong>purge</strong>.</li>
+  <li><strong>Reverse proxy ve microservice</strong> iskeleti oluşturur; ilk günden itibaren kimlik doğrulama kenarda yapılır ve kimlik header'larıyla aşağıya iletilir.</li>
+</ul>
+<p>Reddedilen alternatifler: canlı açık artırma (en güçlü alternatif, ancak WebSocket kullanımı daha zayıf, CDN kısmı cılız), canlı yayın sohbeti (chat projesine çok yakın), canlı konum takibi (CDN ve webhooks zorlama olurdu).</p>
+<p>Çakışma çözümü için <strong>karakter düzeyinde Operational Transformation (OT)</strong> seçildi (ot.js / Google Wave soyu). CRDT reddedildi çünkü tek sıralama süreci ihtiyacını ortadan kaldırır ve böylece sticky routing dersini de kaldırırdı. Blok düzeyinde last-writer-wins ise fazla sığ bulundu.</p>
+
+<h2>4. Hedef mimari (Ay 6 sonu)</h2>
+<p>Bağımsız deploy edilebilen dört Go servisi, yerel geliştirme için bir Go workspace (<code>go.work</code>) ile bir arada. doc-service Ay 3'ten itibaren <strong>N instance</strong> olarak çalışır.</p>
+<pre>
+  tarayıcı ──HTTP/WS──▶ gateway :9000 ─┬─ consistent hash(doc id) ──▶ doc-service :9001 ─┐
+                        - register/login│                             doc-service :9011 ─┤ outbox relay
+                        - JWT → X-User-ID│─ round-robin (/documents) ──────────┘          │ (HTTP, imzalı)
+                        - ws-ticket      │                                                 ▼
+                        - reverse proxy  ├─ /webhook /subscriptions /deliveries ──▶ notification-service :9003
+                        - load balancer  │                                            (fan-out, HMAC, retry, SSRF filtresi)
+                        - rate limiter   ├─ /assets/:sha  /p/:slug (edge cache) ──▶ publish-service :9004
+                        - edge cache     │   ◀── DELETE /edge/p/:slug (purge) ──      (Markdown→HTML, içerik adresli dosyalar)
+                                         │
+              MySQL :3308 (docs_gateway_db, docs_service_db, docs_notification_db, docs_publish_db)
+              Redis :6381 (rate limit sayaçları, doküman listesi cache'i)
+</pre>
+
+<h3>4.1 Servisler</h3>
+<table>
+  <tr><th>Servis</th><th>Sorumluluk</th></tr>
+  <tr><td><strong>gateway</strong></td><td>Tek dış giriş noktası. Kullanıcılar ve kimlik doğrulama (<code>/register</code>, <code>/login</code>, <code>role</code> claim'li JWT), tek kullanımlık WebSocket biletleri, editör sayfası, her şeyin önünde reverse proxy. JWT'yi bir kez doğrular, kimliği <code>X-User-ID</code> + <code>X-User-Role</code> olarak iletir, <code>X-Gateway-Key</code> ile isteğin kendinden geldiğini kanıtlar, <code>Authorization</code> header'ını siler. Ay 3'ten itibaren load balancer, Ay 4'ten rate limiter, Ay 6'dan edge cache.</td></tr>
+  <tr><td><strong>doc-service</strong></td><td>Dokümanlar: metadata, üyelik (doküman başına rol), her açık doküman için OT oturumu, yalnızca ekleme yapılan operasyon günlüğü, periyodik snapshot'lar, doküman içi presence ve imleçler. Webhook'a dönüşecek outbox satırlarını yazar. Bir doküman aynı anda tam olarak bir instance tarafından sunulur.</td></tr>
+  <tr><td><strong>notification-service</strong></td><td>Webhook'lar: kullanıcının endpoint'i ve sırrı, abonelikler (hangi dokümanlar, hangi olay tipleri), teslimat günlüğü. Outbox relay'den olay alır, fan-out yapar, imzalar, yeniden denemeyle teslim eder, özel adreslere bağlanmayı reddeder.</td></tr>
+  <tr><td><strong>publish-service</strong></td><td>Belirli bir sürümdeki dokümanı statik HTML sayfasına çevirir, sayfayı ve yüklenen görselleri diskte içerik adresli saklar, doküman başına <strong>slug</strong>'ı güncel hash'e eşler. CDN'in <em>origin</em>'i; gateway ise edge.</td></tr>
+  <tr><td><em>presence-service yok</em></td><td>Chat projesi buna ihtiyaç duyuyordu çünkü bir odanın üyeleri instance'lara dağılmıştı. Burada doküman tek instance'ta yaşar; "bu dokümanda kim var" bellek içi ve kesindir. Redis bu projede yalnızca gerçekten gerektiren iki kavram içindir: caching ve rate limiting.</td></tr>
+</table>
+
+<h3>4.2 Portlar</h3>
+<p class="small">Üç öğrenme projesi yan yana çalışabilsin diye seçildi (<code>notification-api</code> 8080/3306/6379, <code>realtime-chat-platform</code> 8000–8011/3307/6380 kullanır).</p>
+<table>
+  <tr><th>Bileşen</th><th>Port</th><th>Not</th></tr>
+  <tr><td>gateway</td><td>9000</td><td>public</td></tr>
+  <tr><td>doc-service</td><td>9001, 9011 (…9021)</td><td>Ay 3'ten itibaren port başına bir süreç</td></tr>
+  <tr><td>notification-service</td><td>9003</td><td>yalnızca gateway üzerinden</td></tr>
+  <tr><td>publish-service</td><td>9004</td><td>yalnızca gateway üzerinden</td></tr>
+  <tr><td>MySQL</td><td>3308 → 3306</td><td>container <code>docs_mysql</code></td></tr>
+  <tr><td>Redis</td><td>6381 → 6379</td><td>container <code>docs_redis</code></td></tr>
+  <tr><td>webhook alıcısı (doğrulama)</td><td>9900</td><td>geçici yerel süreç</td></tr>
+</table>
+
+<h3>4.3 Sırlar ve kimlerle paylaşıldığı</h3>
+<p>Her sırrın <strong>varsayılan değeri yoktur</strong>; ihtiyaç duyan servis, değer ayarlanmamışsa başlangıçta hemen çıkar. Öngörülebilir bir varsayılan, herkesin token sahtelemesine veya bir servisi taklit etmesine izin verirdi. Paylaşılan <em>sır</em>, paylaşılan <em>kod</em> değil: ortak Go modülü yoktur.</p>
+<table>
+  <tr><th>Sır</th><th>Paylaşan taraflar</th><th>Amaç</th></tr>
+  <tr><td><code>JWT_SECRET</code></td><td>yalnızca gateway</td><td>Kullanıcı token'larını imzalar ve doğrular; hiçbir backend JWT doğrulamaz</td></tr>
+  <tr><td><code>GATEWAY_SHARED_KEY</code></td><td>gateway → doc, notification, publish</td><td><code>X-User-ID</code>'nin gateway tarafından set edildiğini kanıtlar</td></tr>
+  <tr><td><code>NOTIFICATION_API_KEY</code></td><td>notification-service ← doc-service</td><td>Outbox relay'in olay göndermesi</td></tr>
+  <tr><td><code>PUBLISH_API_KEY</code></td><td>publish-service ← doc-service</td><td>Render istekleri</td></tr>
+</table>
+<p>Servisler arası anahtarlar sabit zamanlı karşılaştırılır (<code>crypto/subtle</code>). Sağladıkları güven, ağ sınırı kadar iyidir: <code>:9001</code>'e doğrudan erişebilen ve <code>GATEWAY_SHARED_KEY</code>'i tutan bir çağıran istediği kullanıcı id'sini iddia edebilir. Bu, projedeki her anahtar için geçerlidir ve hiçbirinin varsayılanı olmamasının sebebidir.</p>
+
+<h3>4.4 Depo yapısı</h3>
+<pre>
+collab-docs-platform/
+├── README.md                  tek doğruluk kaynağı
+├── go.work                    use (./gateway ./doc-service ./notification-service ./publish-service)
+├── docker-compose.yml         mysql:8 (3308) + redis:7 (6381); Ay 6'da servisler eklenir
+├── db/                        gateway_schema.sql, doc_schema.sql, notification_schema.sql (a5), publish_schema.sql (a6)
+├── static/editor.html         tek dosyalık istemci, gateway tarafından / adresinde sunulur
+├── gateway/                   cmd/gateway, config/, internal/{controller,service,repository,domain,middleware,proxy,loadbalancer,edgecache}
+├── doc-service/               cmd/doc, config/, internal/{controller,service,repository,domain,middleware,ot,session,ws,dispatch}
+├── notification-service/      (Ay 5) aynı katmanlama; deliverer, signer, ssrf, fanout
+└── publish-service/           (Ay 6) render (goldmark), storage (içerik adresli), slug haritası
+</pre>
+<p>Her servis aynı dört katmanlı yapıdadır: controller → service → repository → domain; <code>main.go</code>'da constructor injection ile bağlanır; <code>database/sql</code> ve ham SQL, ORM yok. Echo v4, gorilla/websocket, go-redis/v9, golang-jwt/v5, bcrypt.</p>
+
+<h2>5. Veri modeli</h2>
+<p>Şemalar kendi kendine yeterlidir (<code>CREATE DATABASE IF NOT EXISTS</code> + <code>USE</code> + <code>IF NOT EXISTS</code>), böylece hem canlı bir volume'a uygulanabilir hem de <code>docker-entrypoint-initdb.d</code> scripti olarak çalışabilir. Bu scriptler <strong>yalnızca veri dizini boşken</strong> çalışır; sonradan eklenen şema dosyası <code>docker exec -i docs_mysql mysql -uroot -proot &lt; db/&lt;dosya&gt;.sql</code> ile uygulanır.</p>
+
+<table>
+  <tr><th>Şema</th><th>Tablo</th><th>Önemli alanlar / tasarım notu</th></tr>
+  <tr><td><code>docs_gateway_db</code></td><td><code>users</code></td><td><code>id, email (unique), password_hash, role ENUM('user','admin'), created_at</code></td></tr>
+  <tr><td rowspan="4"><code>docs_service_db</code></td><td><code>documents</code></td><td><code>id, owner_id (FK yok), title, content MEDIUMTEXT (snapshot), version (content'e katlanan op sayısı), created_at/updated_at DATETIME(3)</code>; index <code>(owner_id, updated_at)</code></td></tr>
+  <tr><td><code>document_ops</code></td><td>Yalnızca ekleme. <code>PRIMARY KEY (doc_id, version)</code>: aynı doküman için 42. sürümü yazmaya çalışan iki instance burada çakışır; sticky routing'in arkasındaki veritabanı düzeyi güvence. <code>op JSON</code> = <code>[retain, "insert", -delete, ...]</code></td></tr>
+  <tr><td><code>document_members</code></td><td><code>PRIMARY KEY (doc_id, user_id)</code>, <code>role ENUM('owner','editor','viewer')</code>. Sahip de burada bir satırdır; her yetki kontrolü tek tabloda tek sorgudur.</td></tr>
+  <tr><td><code>outbox</code> (Ay 5)</td><td><code>event_id CHAR(32) UNIQUE</code> (idempotency anahtarı), <code>event_type, doc_id, payload JSON, processed_at</code>. Tarif ettiği değişiklikle <strong>aynı transaction</strong>'da yazılır.</td></tr>
+  <tr><td rowspan="3"><code>docs_notification_db</code> (Ay 5)</td><td><code>webhooks</code></td><td><code>user_id PK, url, secret</code> (imzalama için düz metin)</td></tr>
+  <tr><td><code>subscriptions</code></td><td><code>PRIMARY KEY (user_id, doc_id, event_type)</code>; <code>event_type</code> <code>'*'</code> olabilir</td></tr>
+  <tr><td><code>deliveries</code></td><td><code>status ENUM('pending','delivered','failed'), attempts, next_attempt_at</code> (kalıcı retry takvimi), <code>UNIQUE (event_id, user_id)</code></td></tr>
+  <tr><td><code>docs_publish_db</code> (Ay 6)</td><td><code>publications</code></td><td><code>doc_id PK, slug UNIQUE, version, html_hash CHAR(64)</code>. Dosyalar diskte <code>PUBLISH_DIR/&lt;sha256&gt;</code>; tabloya gerek yok, adres içeriğin kendisidir.</td></tr>
+</table>
+<p>Gateway şeması dışındaki <code>user_id</code> sütunlarında <code>users</code>'a <strong>foreign key yoktur</strong>: MySQL, farklı deployable'ların sahip olduğu şemalar arasında bütünlüğü zorlayamaz. Id, gateway'in doğruladığı token'dan geldiği için güvenilir. Eksik kısıt, sınırın bedelidir.</p>
+
+<h2>6. API yüzeyi</h2>
+<p>Yetki sınıfları: <strong>public</strong>; <strong>user</strong> (gateway'de Bearer JWT, aşağıya <code>X-User-ID</code>/<code>X-User-Role</code> + <code>X-Gateway-Key</code> olarak iletilir); <strong>admin</strong> (<code>role=admin</code> olan user); <strong>service</strong> (paylaşılan anahtar header'ı, gateway üzerinden asla erişilemez). Her yerde hata gövdesi <code>{"error":"..."}</code>. Üyesi olunmayan doküman <code>404</code> değil <code>403</code> döner: id'ler ardışıktır, varlığı gizlemek tiyatro olurdu.</p>
+
+<h3>6.1 gateway (:9000)</h3>
+<table>
+  <tr><th>Metot</th><th>Yol</th><th>Yetki</th><th>Ay</th><th>Not</th></tr>
+  <tr><td>GET</td><td><code>/</code></td><td>public</td><td>1</td><td><code>static/editor.html</code></td></tr>
+  <tr><td>GET</td><td><code>/health</code></td><td>public</td><td>1</td><td><code>{"status":"ok"}</code></td></tr>
+  <tr><td>POST</td><td><code>/register</code></td><td>public</td><td>1</td><td>≥ 8 karakter, bir büyük harf, bir rakam → <code>201 {id,email,role}</code></td></tr>
+  <tr><td>POST</td><td><code>/login</code></td><td>public</td><td>1</td><td>→ <code>{token}</code> (24 saat, claim'ler <code>user_id, role</code>)</td></tr>
+  <tr><td>GET</td><td><code>/me</code></td><td>user</td><td>1</td><td></td></tr>
+  <tr><td>POST</td><td><code>/ws-ticket</code></td><td>user</td><td>2</td><td>30 saniye, tek kullanımlık opak bilet</td></tr>
+  <tr><td>GET</td><td><code>/ws?doc=&amp;ticket=</code></td><td>ticket</td><td>2</td><td>doc-service'e proxy (Ay 3'ten itibaren <code>doc</code> üzerinde consistent hash)</td></tr>
+  <tr><td>GET</td><td><code>/admin/users</code>, <code>/admin/documents</code></td><td>admin</td><td>1</td><td>sayfalı</td></tr>
+  <tr><td>GET</td><td><code>/health/backends</code></td><td>admin</td><td>3</td><td>instance sağlık görünümü</td></tr>
+  <tr><td>GET</td><td><code>/health/edge-cache</code></td><td>admin</td><td>6</td><td>entries, bytes, hits, misses, purges</td></tr>
+  <tr><td>GET</td><td><code>/p/:slug</code>, <code>/assets/:sha</code></td><td>public</td><td>6</td><td>edge cache; slug <code>max-age=60</code> + ETag, purge edilebilir; sha <code>immutable</code></td></tr>
+  <tr><td>DELETE</td><td><code>/edge/p/:slug</code></td><td>service</td><td>6</td><td>purge; yeniden yayında publish-service çağırır</td></tr>
+  <tr><td>*</td><td><code>/documents*</code>, <code>/webhook</code>, <code>/subscriptions</code>, <code>/deliveries</code></td><td>user</td><td>1/5</td><td>proxy</td></tr>
+</table>
+
+<h3>6.2 doc-service (:9001, :9011, …)</h3>
+<p class="small"><code>/health</code> dışında tüm route'lar <code>X-Gateway-Key</code> + <code>X-User-ID</code> ister. <code>:id</code> route'ları Ay 3'ten itibaren tek instance'a hash'lenir; <code>/documents</code> (liste, oluşturma) round-robin.</p>
+<table>
+  <tr><th>Metot</th><th>Yol</th><th>Gerekli rol</th><th>Ay</th><th>Not</th></tr>
+  <tr><td>POST</td><td><code>/documents</code></td><td>user</td><td>1</td><td><code>documents</code> + <code>document_members(owner)</code> tek transaction'da</td></tr>
+  <tr><td>GET</td><td><code>/documents?page=&amp;per_page=</code></td><td>user</td><td>1</td><td>üyesi olunan dokümanlar, <code>updated_at DESC, id DESC</code>; Ay 4'ten itibaren kullanıcı başına cache</td></tr>
+  <tr><td>GET</td><td><code>/documents/:id</code></td><td>member</td><td>1</td><td>açıksa canlı oturumdan, değilse snapshot + op replay</td></tr>
+  <tr><td>PATCH</td><td><code>/documents/:id</code></td><td>owner/editor</td><td>1</td><td>yalnızca <code>{title}</code>; içerik WebSocket'ten değişir</td></tr>
+  <tr><td>DELETE</td><td><code>/documents/:id</code></td><td>owner</td><td>1</td><td>oturumu kapatır, soketleri 4004 ile düşürür</td></tr>
+  <tr><td>GET/PUT/DELETE</td><td><code>/documents/:id/members[/:user_id]</code></td><td>member / owner</td><td>1</td><td>PUT upsert (<code>editor|viewer</code>); DELETE o kullanıcının soketlerini 4003 ile düşürür; Ay 5'te outbox satırı</td></tr>
+  <tr><td>GET</td><td><code>/documents/:id/ops?from=</code></td><td>member</td><td>2</td><td>yeniden bağlanma sonrası yakalama, en fazla 500</td></tr>
+  <tr><td>GET</td><td><code>/ws?doc=</code></td><td>member</td><td>2</td><td>WebSocket upgrade, OT oturumu</td></tr>
+  <tr><td>POST</td><td><code>/documents/:id/publish</code></td><td>owner</td><td>6</td><td>publish-service'e render isteği → <code>{slug,url,version}</code></td></tr>
+  <tr><td>POST</td><td><code>/documents/:id/assets</code></td><td>owner/editor</td><td>6</td><td>publish-service'e proxy (multipart, görsel, 5 MiB)</td></tr>
+  <tr><td>GET</td><td><code>/admin/documents</code></td><td>admin</td><td>1</td><td>tüm dokümanlar, sayfalı</td></tr>
+</table>
+
+<h3>6.3 notification-service (:9003, Ay 5) ve publish-service (:9004, Ay 6)</h3>
+<table>
+  <tr><th>Servis</th><th>Metot</th><th>Yol</th><th>Yetki</th><th>Not</th></tr>
+  <tr><td>notification</td><td>PUT/DELETE</td><td><code>/webhook</code></td><td>user</td><td><code>{url}</code> → <code>{url,secret}</code>; sır yalnızca burada gösterilir</td></tr>
+  <tr><td>notification</td><td>POST/DELETE</td><td><code>/subscriptions[/:doc_id/:event_type]</code></td><td>user</td><td><code>event_type</code> ∈ shared, unshared, updated, published, <code>*</code></td></tr>
+  <tr><td>notification</td><td>GET</td><td><code>/deliveries</code></td><td>user</td><td>kullanıcının kendi denetim izi</td></tr>
+  <tr><td>notification</td><td>POST</td><td><code>/events</code></td><td>service <code>X-Notification-Key</code></td><td>→ <code>202</code>; tekrar eden <code>event_id</code> → <code>202</code> no-op</td></tr>
+  <tr><td>publish</td><td>POST</td><td><code>/render</code></td><td>service <code>X-Publish-Key</code></td><td>Markdown → HTML, <code>sha256(html)</code> ile sakla, <code>publications</code> upsert, gateway'de purge</td></tr>
+  <tr><td>publish</td><td>POST</td><td><code>/assets</code></td><td>gateway key + user</td><td>tür header'dan değil baytlardan tespit edilir</td></tr>
+  <tr><td>publish</td><td>GET</td><td><code>/p/:slug</code>, <code>/assets/:sha</code></td><td>gateway key</td><td>origin okuması; ETag, <code>Cache-Control</code>, <code>304</code></td></tr>
+</table>
+
+<h2>7. Çakışma çözümü: Operational Transformation (OT)</h2>
+<p>Bu bölüm, kavram listesinden çıkarılamayacak tek parça olduğu için README'de tam olarak belirtilmiştir; burada özetlenir. Her şey düz metindir; zengin metin, geri alma ve çevrimdışı düzenleme tüm proje boyunca kapsam dışıdır.</p>
+
+<h3>7.1 Pozisyonlar ve operasyon formatı</h3>
+<p>Pozisyon ve uzunluklar <strong>Unicode code point</strong> cinsindendir; bayt veya UTF-16 birimi değil. Go'da <code>[]rune(s)</code>, JavaScript'te <code>Array.from(str)</code>. Bir <code>textarea</code>'nın <code>selectionStart</code>'ı UTF-16 birimindedir ve imleç pozisyonu olarak gönderilmeden önce <strong>dönüştürülmelidir</strong>; aksi halde ilk emoji'de iki taraf birbirinden kopar.</p>
+<table>
+  <tr><th>Bileşen</th><th>JSON</th><th>Anlam</th></tr>
+  <tr><td>retain <em>n</em></td><td>pozitif tam sayı</td><td><em>n</em> code point'i atla</td></tr>
+  <tr><td>insert <em>s</em></td><td>boş olmayan string</td><td>mevcut pozisyona <em>s</em> ekle</td></tr>
+  <tr><td>delete <em>n</em></td><td>negatif tam sayı</td><td>mevcut pozisyondan <em>n</em> code point sil</td></tr>
+</table>
+<pre>doküman:  "hello world"   (11)
+op:       [6, "brave ", -5, "there"]
+sonuç:    "hello brave there"</pre>
+<p>Değişmezler (<code>ot.Validate</code> ile her gelen op'ta kontrol edilir): <code>baseLen(op)</code> uygulanacak dokümanın uzunluğuna <strong>eşit olmalı</strong> (uyuşmazlık → hata, asla "sığanı uygula"); kanonik form (sıfır bileşen yok, aynı türden bitişik bileşen yok, delete-sonra-insert → insert-sonra-delete); boyut sınırı op için 64 KiB, doküman için 1 MiB code point.</p>
+
+<h3>7.2 Üç algoritma</h3>
+<ul>
+  <li><strong>apply(doc, op)</strong>: bileşenleri <code>[]rune(doc)</code> üzerinde bir imleçle yürü; retain kopyalar, insert ekler, delete atlar. O(len(doc)).</li>
+  <li><strong>compose(a, b)</strong>: <code>apply(apply(d,a),b) == apply(d, compose(a,b))</code>. İstemci tamponlanmış yerel op'ları tek op'a katlarken, sunucu snapshotter kuyruğu snapshot'a katlarken kullanır. Rastgele op üreteciyle fuzz testi <strong>projedeki en değerli tek testtir</strong>.</li>
+  <li><strong>transform(a, b) → (a′, b′)</strong>: aynı durum üzerinde üretilmiş iki op için <code>apply(apply(d,a),b′) == apply(apply(d,b),a′)</code>. Aynı pozisyondaki eşzamanlı insert'lerde <strong>günlükteki op pozisyonu kazanır</strong>; iki taraf da günlükteki op'u <code>a</code> olarak geçirir. Bu kural kodda belgelenir ve <code>TestTransformConcurrentInsertLogOrderWins</code> ile açıkça test edilir; taraflar hangi argümanın <code>a</code> olduğunda anlaşamazsa metinler <em>farklı</em> noktalarda yakınsar ve sistemde başka hiçbir şey nedenini söylemez.</li>
+</ul>
+
+<h3>7.3 Sunucu: doküman oturumu</h3>
+<p>Açık doküman başına bir <code>Session</code>, <strong>tek goroutine</strong>'e (<code>run()</code>) aittir, yalnızca kanallar üzerinden erişilir. Doküman durumu etrafında mutex yoktur; sıralama goroutine'in seri yürütmesidir. Durum: <code>content []rune</code>, <code>version</code>, son 1000 <code>(version, op)</code> çiftinden oluşan halka, <code>clients map[*Client]role</code>.</p>
+<ul>
+  <li><strong>Açılış:</strong> snapshot + <code>document_ops WHERE version &gt; snapshot</code> yükle ve katla.</li>
+  <li><strong>İstemci op'u</strong> <code>{v, op, seq}</code>: viewer → <code>forbidden</code>; <code>v &gt; version</code> → 4400; <code>version − v &gt; 1000</code> → 4409 (yeniden yükle); aksi halde halkadaki <code>(v, version]</code> aralığındaki her op'a karşı transform et, doğrula, uygula, halkaya it.</li>
+  <li><strong>Persist-before-ack:</strong> writer goroutine <code>INSERT INTO document_ops</code> yapar; commit döndükten <em>sonra</em> gönderene <code>ack</code>, diğerlerine <code>op</code> gider. Maliyet: batch başına bir MySQL gidiş-dönüş. Kazanç: istemci, veritabanında olmayan bir op için asla ack tutmaz. Çökme yalnızca <em>tekrar</em> üretir, kayıp değil; <code>(doc_id, version)</code> primary key tekrarı hataya çevirir.</li>
+  <li><strong>Snapshot:</strong> 100 op veya 30 saniye (kirliyse). <code>UPDATE … WHERE version &lt; ?</code> monoton guard. Op'lar silinmez; günlük tarihtir.</li>
+  <li><strong>İmleçler:</strong> doğrulanır, fan-out yapılır, asla saklanmaz.</li>
+  <li><strong>Üyelik değişikliği</strong> oturum kanalına gelir: viewer'a düşürülme → soket kalır, op'lar reddedilir; kaldırılma → 4003.</li>
+  <li><strong>Kapanış / shutdown:</strong> son istemci ayrılınca snapshot, 60 saniye sıcak tutma; SIGTERM'de upgrade kabulü durur, kirli oturumlar snapshot'lanır, soketler 1001 ile kapanır.</li>
+  <li>Writer oturum goroutine'ini asla bloklamaz; kuyruk dolunca oturum soketlerden okumayarak <strong>backpressure</strong> uygular, op düşürmez.</li>
+</ul>
+
+<h3>7.4 Wire protokolü ve istemci</h3>
+<p>Tüm frame'ler JSON metin frame'idir. İstemci → sunucu: <code>op</code> (aynı anda en fazla bir tane uçuşta), <code>cursor</code>, <code>ping</code>. Sunucu → istemci: <code>snapshot</code>, <code>ack</code>, <code>op</code>, <code>cursor</code>, <code>presence</code>, <code>title</code>, <code>error</code>. Kapanış kodları: 4003 üyelik iptal, 4004 doküman silindi, 4400 protokol ihlali, 4409 çok geride, 4429 rate limit (Ay 4), 1011 sunucu hatası, 1001 shutdown.</p>
+<p>İstemci (<code>static/editor.html</code>, ot.js üç durumlu makine): <code>Synchronized</code> | <code>AwaitingConfirm(outstanding)</code> | <code>AwaitingWithBuffer(outstanding, buffer)</code>. Textarea'dan op üretimi: her <code>input</code> olayında önceki değerle yeni değer arasında en uzun ortak önek/sonek farkı; olay başına tam olarak bir op. Yeniden bağlanma: 1, 2, 4, 10 saniye backoff; <code>snapshot</code> gelince onaylanmamış yerel op'lar <em>düşürülür</em> ve bir satırlık uyarı gösterilir.</p>
+
+<h3>7.5 Limitler (varsayılan, env ile ayarlanabilir)</h3>
+<table>
+  <tr><th>Ad</th><th>Varsayılan</th><th>Nerede uygulanır</th></tr>
+  <tr><td><code>DOC_MAX_CODEPOINTS</code></td><td>1 048 576</td><td>oturum, <code>targetLen</code></td></tr>
+  <tr><td><code>OP_MAX_BYTES</code></td><td>65 536</td><td>ws read limit ve validator</td></tr>
+  <tr><td><code>OP_RING_SIZE</code></td><td>1000</td><td>oturum</td></tr>
+  <tr><td><code>SNAPSHOT_EVERY_OPS</code> / <code>_SECONDS</code></td><td>100 / 30</td><td>snapshotter</td></tr>
+  <tr><td><code>SESSION_IDLE_SECONDS</code></td><td>60</td><td>oturum kapanışı</td></tr>
+  <tr><td><code>WS_OPS_PER_SECOND</code> (Ay 4)</td><td>20, burst 40</td><td>bağlantı başına token bucket</td></tr>
+  <tr><td><code>WS_OPS_PER_MINUTE_PER_USER</code> (Ay 4)</td><td>600</td><td>Redis, bağlantılar ve instance'lar arası</td></tr>
+</table>
+
+<h2 class="month">8. Aylık plan</h2>
+<p>Her ay dört haftalık bir kırılımla verilmiştir. Haftalar rehber niteliğindedir; ayın çıkış kriterleri bağlayıcıdır. Her ay için kapsam, tasarım notları, doğrulama ve çıkış kriterleri README ile birebirdir.</p>
+
+<h3>Ay 1 — Ekim 2026 — Auth &amp; Authorization, Microservice, Reverse Proxy</h3>
+<p><strong>Hedef:</strong> giriş yapabilen, doküman oluşturup paylaşabilen ve salt okunur açabilen iki servis ve bir tarayıcı sayfası. WebSocket henüz yok. Sonraki ayların kimlik ve sınırlar hakkında varsaydığı her şey bu ay kararlaştırılır.</p>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td>Depo iskeleti: <code>go.work</code>, <code>docker-compose.yml</code> (MySQL 3308 + Redis 6381), <code>db/gateway_schema.sql</code>, <code>db/doc_schema.sql</code>, <code>.gitignore</code>. <strong>gateway:</strong> <code>/register</code>, <code>/login</code>, <code>/me</code>, <code>/admin/users</code> (notification-api'den port), JWT claim'leri <code>user_id, role, exp</code> (24 saat), <code>request_id</code> + <code>logger</code> middleware (loglarda yalnızca path, asla query string). <em>(Eylül'de öne alınarak tamamlandı.)</em></td></tr>
+  <tr><td>2</td><td><strong>İlk günden edge auth:</strong> <code>internal/proxy/trusted_proxy.go</code> (chat'ten port) Bearer token'ı doğrular, <code>X-User-ID</code>, <code>X-User-Role</code>, <code>X-Gateway-Key</code> set eder, istemciden gelen kopyaları <strong>üzerine yazar</strong>, <code>Authorization</code>'ı siler ve proxy'ler. Admin route'ları proxy öncesi ek olarak <code>role</code> kontrol eder. <code>/documents*</code> → <code>DOC_SERVICE_URL</code> (<code>httputil.ReverseProxy</code>).</td></tr>
+  <tr><td>3</td><td><strong>doc-service:</strong> <code>gateway_auth</code> middleware (sabit zamanlı anahtar karşılaştırma, <code>X-User-ID</code> parse), documents CRUD, members CRUD, <code>/admin/documents</code>, <code>updated_at DESC, id DESC</code> sayfalama. Yetki kontrolleri <code>document_members</code> üzerinde tek sorgu. Sahip satırı dokümanla aynı transaction'da.</td></tr>
+  <tr><td>4</td><td><code>static/editor.html</code> v1: login formu, doküman listesi, oluşturma, açma (salt okunur <code>textarea</code>), sahipler için üye paneli. Testler: <code>validation</code>, <code>jwt</code>, <code>gateway_auth</code>, üye yetki matrisi (owner/editor/viewer × her endpoint) <code>httptest</code> ile; <code>DOCS_TEST_DSN</code> set edilmişse gerçek MySQL, değilse skip. README güncelleme, commit.</td></tr>
+</table>
+<p><strong>Tasarım notları:</strong> gateway <strong>tek</strong> JWT doğrulayıcıdır; backend'ler header'lara güvenir çünkü anahtar kimin set ettiğini kanıtlar. Yetki doc-service'te kontrol edilir, gateway'de değil: gateway dokümanın ne olduğunu bilmez. Ayın dersi: <em>kimlik doğrulama kenarda, yetkilendirme kaynağın sahibinde</em>.</p>
+<p><strong>Çıkış kriterleri:</strong> yetki matrisi testi geçer; <code>editor.html</code> giriş yapar, oluşturur, paylaşır ve açar; <code>Authorization</code> hiçbir doc-service log satırında görünmez; istemciden gönderilen kimlik header'ları atılır (<code>X-User-ID: 1</code> ile B'nin listesi değil A'nın listesi dönmez); <code>:9001</code>'e gateway anahtarı olmadan doğrudan istek <code>401</code> alır.</p>
+
+<h3 class="month">Ay 2 — Kasım 2026 — WebSocket</h3>
+<p><strong>Hedef:</strong> tek doc-service instance'ında, aynı dokümanı canlı düzenleyen iki tarayıcı. OT ayı; Bölüm 7'deki spesifikasyon sözleşmedir.</p>
+<div class="box"><strong>Sıralama kuralı:</strong> <code>doc-service/internal/ot/</code> paketi ve fuzzer'ı <strong>ilk ve tek başına</strong> yapılır. Fuzzer temiz geçmeden ayın başka hiçbir işine başlanmaz.</div>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td><code>internal/ot/</code>: <code>Operation</code>, <code>Validate</code>, <code>Normalize</code>, <code>Apply</code>, <code>Compose</code>, <code>Transform</code> tablo testleriyle; rastgele op üreteciyle iki özellik testi (compose doğruluğu, TP1); el yazımı vakalar (aynı pozisyona insert vs insert, örtüşen delete'ler, silinen aralığa insert, eklenen aralığa delete); tie-break testi.</td></tr>
+  <tr><td>2</td><td><code>internal/session/</code>: <code>Session</code> goroutine'i, op halkası, batching yapan writer goroutine'i, snapshotter, boşta kapanış, shutdown snapshot'ı. <code>internal/ws/</code>: upgrade handler (üyelik → rol; <code>WS_ALLOWED_ORIGINS</code>, eksik Origin kabul edilir), read/write pump'lı <code>Client</code> (<code>pongWait</code> 60 s, <code>writeWait</code> 10 s, <code>SetReadLimit</code>), yavaş tüketici eviction'ı.</td></tr>
+  <tr><td>3</td><td>Chat'ten <strong>bilet değişimi</strong> portu (token asla URL'de seyahat etmez; gateway bileti kullanır, kimlik header'larını set eder, <code>?ticket=</code>'i siler). <code>GET /documents/:id/ops?from=</code>. <code>GET /documents/:id</code> canlı oturum açıksa ondan cevap verir.</td></tr>
+  <tr><td>4</td><td><code>editor.html</code> v2: durum makinesi, textarea diff'i, imleç koruma, uzak imleçler, presence listesi, backoff ile yeniden bağlanma. Ack gecikmesi ölçümü (tek istemci ve yük altında batching). README, commit.</td></tr>
+</table>
+<p><strong>Tasarım notları:</strong> persist-before-ack ayın büyük kararıdır; ölçülen ack gecikmesi yazılır. Neden mutex değil doküman başına bir goroutine: transform-apply-log dizisi doküman başına atomik olmalıdır ve goroutine kilidi unutmayı imkânsız kılar; ayrıca <code>run()</code> döngüsünü sıralamanın tanımlandığı tek yer yapar, Ay 3 buna dayanır.</p>
+<p><strong>Çıkış kriterleri:</strong> aynı anda yazan iki tarayıcı sekmesi her seferinde yakınsar; fuzzer'lar 10 000 iterasyon temiz geçer; <code>kill -9</code> hiçbir ack'lenmiş op'u kaybetmez; 101 op sonrası <code>documents.version = 100</code> ve içerik katlanmış (snapshot 100'de tetiklendi).</p>
+
+<h3 class="month">Ay 3 — Aralık 2026 — Load Balancer</h3>
+<p><strong>Hedef:</strong> gateway arkasında N doc-service instance'ı; sticky routing doğruluk argümanı görünür kılınmış.</p>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td><code>gateway/internal/loadbalancer/</code> chat'ten port: <code>Strategy</code> arayüzü, <code>RoundRobin</code> (sağlıklı liste üzerinde), <code>ConsistentHash</code> (150 sanal düğüm, FNV-1a + MurmurHash3 finalizer; regresyon testleri dokümanlar için yeniden adlandırılır), sağlık poller'ı (<code>LB_HEALTH_INTERVAL_SECONDS=5</code>, başlangıçta bir senkron tarama), <code>GET /health/backends</code> (admin).</td></tr>
+  <tr><td>2</td><td><code>main.go</code>'da route başına strateji: <code>GET /ws?doc=</code> → <code>doc</code> üzerinde consistent hash; <code>/documents/:id</code> ve altındaki her şey → <code>:id</code> üzerinde consistent hash (<em>aynı</em> süreç okumaları, üyelik değişikliklerini ve yayını sunmalı); <code>GET/POST /documents</code> → round-robin. Bu ikinci satır chat projesinden farkıdır: bir dokümana HTTP yazımları da oturumuna ulaşmalıdır.</td></tr>
+  <tr><td>3</td><td><code>INSTANCE_ID</code> (varsayılan <code>doc-&lt;port&gt;</code>), <code>X-Doc-Instance</code> cevap header'ı (101'de de), proxy atlaması boyunca paylaşılan <code>request_id</code>. <strong>Fail closed:</strong> halka tüm yapılandırılmış instance'lar üzerine kurulur ve asla yeniden kurulmaz; instance'ı düşük doküman geri gelene kadar <code>503</code> alır.</td></tr>
+  <tr><td>4</td><td>Shutdown sıralaması: SIGTERM → health endpoint hemen 503 → bir health aralığı bekle → snapshot ve soketleri kapat. Doğrulama senaryoları (4 doküman × 3 bağlantı asla karışmaz; B'nin soketi yanlış instance'ta değil doğru instance'ta 4003 ile kapanır; <code>kill -9</code> sonrası hash'lenen dokümanlar 503, <code>/documents</code> her zaman 200). README, commit.</td></tr>
+</table>
+<p><strong>Çıkış kriterleri:</strong> hiçbir doküman iki instance'ta gözlemlenmez; halka testleri geçer; öldürülen instance'ın dokümanları aynı instance'ta geri gelir.</p>
+
+<h3 class="month">Ay 4 — Ocak 2027 — Caching (Redis) + Rate Limiting</h3>
+<p><strong>Hedef:</strong> N instance arasında paylaşılan depo gerektiren iki kavram için Redis devreye girer. İkisi de <code>notification-api</code>'de yapılmıştı; ikisi de burada çok-instance'lı sistemin zorladığı biçimde yeniden yapılır.</p>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td><strong>Caching:</strong> <code>GET /documents</code> için <code>doclist:&lt;user_id&gt;</code> = ilk sayfanın JSON'u, TTL 300 s. Round-robin liste endpoint'inde read-through; write-through invalidasyon (<code>DEL</code>): doküman oluşturma/silme/yeniden adlandırma (sahibin ve her üyenin anahtarı), üye ekleme/çıkarma (o üyenin anahtarı) ve <strong>her snapshot'ta</strong> (liste <code>updated_at</code>'e göre sıralı, <code>updated_at</code> snapshot'ta değişir, her op'ta değil). Boş liste de cache'lenir (negatif caching).</td></tr>
+  <tr><td>2</td><td><strong>Gateway rate limiting:</strong> tüm yetkili HTTP için <code>user_id</code> (public route'larda IP) anahtarıyla Redis'te <strong>kayan pencere günlüğü</strong>, tek Lua script (<code>ZADD/ZREMRANGEBYSCORE/ZCARD/EXPIRE</code> atomik), 120/dk, <code>429</code> + <code>Retry-After</code>. <code>POST /login</code> için <code>email</code> + IP ile sabit pencere (notification-api portu), 5/dk; yanlış şifre ile rate-limit cevabı aynı (enumeration oracle'ı önlemek için).</td></tr>
+  <tr><td>3</td><td><strong>WebSocket rate limiting:</strong> bağlantı başına bellek içi token bucket (<code>golang.org/x/time/rate</code>), 20/s burst 40, aşımda <code>error{rate_limited}</code>, 10 saniyede üç aşım → 4429. <code>user_id</code> başına instance'lar arası Redis INCR, 600/dk → 4429. <code>cursor</code> frame'leri 20/s üstünde sessizce düşürülür.</td></tr>
+  <tr><td>4</td><td>Ölçümler: sabit pencere vs kayan pencere sınır davranışı (sabit pencere sınırda 2× limit kabul eder), her ikisinin sayıları yazılır. Redis çökmesinde limiter'lar <strong>fail open</strong> (log satırıyla), cache bypass. Doğrulama: 130 istek → 120 × 200, 10 × 429; 6 login → 5 × 401, 1 × 429; cache anahtarı diğer instance'tan invalidasyon. README, commit.</td></tr>
+</table>
+<p><strong>Tasarım notları:</strong> WebSocket limiter'ı neden in-process: bağlantı başınadır, bağlantı tek instance'tadır ve tuş vuruşu başına Redis gidiş-dönüşü Redis'i ack yoluna koyardı. Kullanıcı başına Redis sayacı in-process olanın göremediği durum içindir: aynı kullanıcı, instance'lar arası on bağlantı. Cache'te ders: cache'lenen görünümün <em>ne kadar</em> bayat olabileceğini seçmek ve adlandırmak; burada bir dokümanın listedeki yeri son düzenlemesinden en fazla <code>SNAPSHOT_EVERY_SECONDS</code> geride kalabilir.</p>
+<p><strong>Çıkış kriterleri:</strong> liste okumaları Redis'e gider; invalidasyon instance'ları aşar; dört limiter'ın hepsi gözlemlenebilir şekilde çalışır; Redis kapalıyken sistem ayakta kalır.</p>
+
+<h3 class="month">Ay 5 — Şubat 2027 — Webhooks</h3>
+<p><strong>Hedef:</strong> doküman olayları kullanıcının kayıtlı endpoint'ine imzalı, yeniden denemeli ve <strong>veritabanı yazımı ile teslimat arasında asla kaybolmadan</strong> ulaşır. Chat projesinin <code>notification-service</code>'i temeldir; transactional outbox yeni kısımdır.</p>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td><strong>doc-service'te outbox:</strong> üye ekleme/çıkarma, yayın (Ay 6) ve başlık değişikliği olay satırını değişiklikle <strong>aynı transaction</strong>'da yazar. <code>document.updated</code> farklıdır: <em>snapshotter</em> tarafından, doküman başına snapshot başına en fazla bir kez, <code>{doc_id, version, editors:[…]}</code> payload'ıyla yazılır. Coalescing budur: tuş vuruşu hızındaki düzenlemeler doküman başına 30 s / 100 op'ta en fazla bir webhook olur.</td></tr>
+  <tr><td>2</td><td><strong>Outbox relay:</strong> her doc-service instance'ında bir goroutine <code>SELECT … WHERE processed_at IS NULL ORDER BY id LIMIT 50 FOR UPDATE SKIP LOCKED</code> ile her <code>OUTBOX_POLL_MS=500</code>'de yoklar, her birini notification-service <code>/events</code>'e <code>X-Notification-Key</code> ile POST eder, <code>202</code>'de <code>processed_at</code> işaretler. <code>SKIP LOCKED</code> N instance'ın aynı tabloyu çift göndermeden yoklamasını sağlar; aşağıdaki <code>event_id</code> unique key yedek güvencedir. At-least-once, idempotent kılınmış.</td></tr>
+  <tr><td>3</td><td><strong>notification-service</strong> chat'ten port (<code>webhook_service</code>, <code>signer</code>, <code>ssrf</code>, <code>deliverer</code>, <code>fanout_service</code>) şu değişikliklerle: abonelikler <code>event_type</code> taşır; fan-out = <code>(doc_id, event_type)</code> ∪ <code>(doc_id, '*')</code> aboneleri, eyleyen hariç, endpoint'i olanlar; <code>document.shared</code> ayrıca davet edilen kişiye de gider. <strong>Kalıcı retry:</strong> <code>deliveries.next_attempt_at</code> takvimdir; worker havuzu vadesi gelen satırları (<code>SKIP LOCKED</code>) yoklar. Backoff 1, 2, 4, 8, 16 s ±%50 jitter, 5 deneme, <code>4xx</code> nihai, <code>5xx</code>/transport yeniden denenir. İmza: <code>X-Signature: sha256=HMAC(secret, "&lt;X-Timestamp&gt;.&lt;body&gt;")</code>. SSRF filtresi: kayıtta string kontrolü, transport'ta dial-time kontrolü, loopback yalnızca <code>WEBHOOK_ALLOW_LOOPBACK=true</code> ile.</td></tr>
+  <tr><td>4</td><td>Gateway <code>/webhook</code>, <code>/subscriptions</code>, <code>/deliveries</code>'i edge auth ile proxy'ler. Doğrulama: :9900'de imza doğrulayan alıcı; bir dakikada 300 karakter → ~2-3 <code>document.updated</code>; A B'yi çıkarır → B <code>document.unshared</code> alır; alıcı 503 verirken notification-service <code>kill -9</code> → <code>next_attempt_at</code> onurlandırılır; outbox insert'ten hemen sonra doc-service <code>kill -9</code> → diğer instance'ın relay'i işler; <code>processed_at IS NULL</code> sayısı 0. README, commit.</td></tr>
+</table>
+<p><strong>Çıkış kriterleri:</strong> teslimat satırı olmayan olay yok; çökme boyunca kaybolan teslimat yok; coalescing ölçülmüş; SSRF vakaları reddedilmiş.</p>
+
+<h3 class="month">Ay 6 — Mart 2027 — CDN ve sertleştirme</h3>
+<p><strong>Hedef:</strong> yayınlanmış dokümanlar ve görselleri, iki cache disiplinini de (sonsuza dek değişmez ve purge'lü değişebilir) uygulayan bir edge cache üzerinden sunulur; proje bir durma noktasına sertleştirilir.</p>
+<table>
+  <tr><th>Hafta</th><th>İş</th></tr>
+  <tr><td>1</td><td><strong>publish-service:</strong> <code>POST /assets</code> (içerik adresli görsel deposu, tür baytlardan tespit, 5 MiB; media-service portu), <code>POST /render</code> (goldmark Markdown → HTML, başlıklı minimal şablon; <code>sha256(html)</code>'de saklanır; <code>publications</code> upsert; ardından gateway'de <code>DELETE /edge/p/:slug</code>), origin okumaları <code>/p/:slug</code> ve <code>/assets/:sha</code> uygun header'larla. Dokümanlarda görsel referansı Markdown <code>![alt](/assets/&lt;sha&gt;)</code>; editörün görsel butonu yükler ve ekler.</td></tr>
+  <tr><td>2</td><td><strong>Gateway edge cache</strong> (<code>internal/edgecache</code>, chat'ten port: bayt sınırlı LRU, nesne başına üst sınır, miss'te single-flight, cache'lenemeyen cevaplar için <code>BYPASS</code>, <code>X-Cache</code> header'ı) değişebilir durumla genişletilir: <code>/assets/:sha</code> sonsuza dek cache; <code>/p/:slug</code> origin'in <code>max-age=60</code>'ıyla cache, süre dolunca <code>If-None-Match</code> ile <strong>revalidate</strong> (<code>X-Cache: REVALIDATED</code>); <strong>purge</strong> ile yeniden yayın sonraki istekte görünür. Purge best-effort'tur (gateway kapalı olabilir; TTL yedektir), gerçek CDN'lerin davranışı da budur. <code>/</code> (editor.html) aynı cache'ten dosya hash'i ETag'iyle. Cache <code>Authorization</code> taşıyan isteklerin ve <code>Set-Cookie</code>/<code>private</code> cevapların asla saklanmadığını test ile kanıtlar.</td></tr>
+  <tr><td>3</td><td><code>GET /health/edge-cache</code> <code>purges</code> ve <code>revalidations</code> kazanır. <code>POST /documents/:id/publish</code> doküman başına 6/dk rate limit (render sistemdeki en pahalı istek). Doğrulama: aynı sayfanın sürümü başına bir origin fetch; purge gözlemlenebilir; 61 s sonra REVALIDATED; <code>Authorization</code> ile BYPASS.</td></tr>
+  <tr><td>4</td><td><strong>Sertleştirme / durma noktası:</strong> servis başına Dockerfile ve tam <code>docker-compose.yml</code> (dört servis, iki doc-service replikası, MySQL, Redis) — tüm sistem tek komutla kalkar; her serviste graceful shutdown denetimi (drain sırası belgelenir); <code>make check</code> içinde <code>go vet</code> ve <code>-race</code>; <code>Bilinen ödünler</code> üzerinden son geçiş; Ay 1 duman testi uçtan uca. README, final commit.</td></tr>
+</table>
+<p><strong>Çıkış kriterleri:</strong> bir sayfanın sürümü başına kaç okuma olursa olsun tek origin fetch; purge gözlemlenebilir; <code>docker compose up</code> dokuz kavramın tamamını ayağa kaldırır.</p>
+
+<h2 class="month">9. Ay sonu ritüeli ve teslim standardı</h2>
+<ol>
+  <li>README'nin <code>Month N</code> bölümü <em>planlanan</em>dan <em>yapılan</em>a yeniden yazılır; "planlanan" metin eklenmez, değiştirilir. Orijinal niyet yalnızca sonuç farklıysa ve fark dersse tutulur.</li>
+  <li>Doğrulama bloğu okuyucunun çalıştırabileceği gerçek çıktılarla güncellenir.</li>
+  <li><code>Bilinen ödünler</code> listesi güncellenir.</li>
+  <li><code>go test ./... -race</code> yeşil; OT özellik testleri için <code>-count=1000</code>.</li>
+  <li>Tek commit <code>Month N: &lt;özet&gt;</code>; pre-push inceleme panelinin bulguları <code>Address review findings: …</code> commit'iyle giderilir, bastırılmaz.</li>
+  <li><code>Running locally</code> bloğu yeni servisler eklendikçe güncellenir.</li>
+</ol>
+
+<h2>10. Taşınan mühendislik kuralları</h2>
+<p>Her biri bir önceki projede kazanıldı; kural değil gerekçe önemlidir.</p>
+<ul>
+  <li><strong>Hiçbir sırrın varsayılanı yok.</strong> Konfigürasyonundan önce yayınlanan bir binary başlangıçta gürültülü şekilde çıkar.</li>
+  <li><strong>Paylaşılan sır, paylaşılan kod değil.</strong> Servisler arası ortak Go modülü yok; her biri ihtiyacını kopyalar. Kopyalar arası sapma bağımsız deploy edilebilirliğin dürüst bedelidir.</li>
+  <li><strong>Servis başına veritabanı; şemalar arası foreign key yok.</strong></li>
+  <li><strong>Kimlik doğrulama kenarda, yetkilendirme kaynağın sahibinde.</strong> Bu projede yeni, Ay 1'de kararlaştırıldı.</li>
+  <li><strong>Her paylaşılan anahtar için sabit zamanlı karşılaştırma</strong> (<code>crypto/subtle</code>).</li>
+  <li><strong>Tek goroutine'li sıcak döngüyü hiçbir şey bloklamaz.</strong> Writer, outbox relay ve her dışa HTTP çağrısı sınırlı kuyruk arkasındadır. Tek bilinçli istisna: oturum, düzenlemeleri düşürmek yerine soketlere backpressure uygular.</li>
+  <li><strong>Her sayfalı sıralamada <code>DATETIME(3)</code> ve <code>id</code> tiebreak.</strong> Saniye çözünürlüklü eşitlikler <code>LIMIT/OFFSET</code>'i belirsiz yapar.</li>
+  <li><strong><code>docker-entrypoint-initdb.d</code> yalnızca boş volume'da çalışır</strong>; şema dosyaları canlı volume'a uygulanabilecek şekilde kendi kendine yeterlidir.</li>
+  <li><strong>Her heartbeat/TTL çifti için 3× kuralı</strong> (aralık × 3 ≤ TTL), iki kaçırma tolere edilir.</li>
+  <li><strong>Her proxy'lenen istek iki tarafta da görünür bir <code>request_id</code> taşır</strong> ve cevaplayan instance kendini bir header'da adlandırır.</li>
+  <li><strong>Loglar path'i kaydeder, asla query string'i değil</strong> (biletler ve token'lar daha önce query string'de bulundu).</li>
+  <li><strong>WebSocket upgrade'de eksik <code>Origin</code> kabul edilir</strong>, yanlış olan reddedilir. Cross-site WebSocket hijacking bir tarayıcı saldırısıdır ve tarayıcılar her zaman <code>Origin</code> gönderir.</li>
+  <li><strong>Canlı bağımlılık gerektiren testler bağımlılık yoksa skip eder</strong>, böylece <code>go test ./... -race</code> her yerde çalışır.</li>
+  <li><strong>README, tarif ettiği kodla aynı commit'te güncellenir.</strong></li>
+</ul>
+
+<h2>11. Bilinen ödünler ve kapsam dışı konular</h2>
+<p>Her ay revize edilir. Baştan kararlaştırılan başlangıç listesi:</p>
+<ul>
+  <li><strong>Yalnızca düz metin.</strong> Zengin metin, geri al/yinele, yorum yok. Nitelikli metin üzerinde OT farklı (daha büyük) bir algoritmadır; sistem tasarımı dersleri ona ihtiyaç duymaz.</li>
+  <li><strong>Çevrimdışı düzenleme yok.</strong> Onaylanmamış yerel op'ları olan yeniden bağlanan istemci onları düşürür.</li>
+  <li><strong>Ölü instance dokümanlarını beraberinde götürür</strong>, geri gelene kadar (fail-closed sticky routing). "Gerçek" çözüm paylaşılan bir op günlüğüdür (Redis Streams veya kuyruk); bu, kılık değiştirmiş dağıtık konsensüstür ve bilinçli olarak yapılmaz.</li>
+  <li><strong>Instance üyeliği statiktir</strong> (<code>DOC_SERVICE_URLS</code> başlangıçta). Servis keşfi farklı bir derstir.</li>
+  <li><strong>Sağlık yoklanır, gözlemlenmez</strong>; instance ölümü ile sonraki yoklama arasındaki boşluktaki istek <code>502</code> alır.</li>
+  <li><strong>Tek gateway.</strong> Bilet deposu ve edge cache süreç başınadır.</li>
+  <li><strong>Cache miss stampede ele alınmaz</strong>; anahtar başına single-flight bilinen çözümdür.</li>
+  <li><strong>Redis kapalıyken rate limiter'lar fail open</strong>; erişilebilirlik katılıktan önce.</li>
+  <li><strong>Webhook sırları düz metin saklanır</strong> (imzalama değeri gerektirir).</li>
+  <li><strong>Op günlüğü asla budanmaz.</strong> Bu ölçekte tarih ucuzdur.</li>
+  <li><strong><code>document.updated</code> granülerliği snapshot aralığıdır.</strong> Her tuş vuruşunu isteyen entegrasyon webhook değil WebSocket istemcisi olmalıdır.</li>
+  <li><strong>Persist-before-ack, op batch'i başına bir veritabanı gidiş-dönüşüne mal olur.</strong> Alternatif (önce ack, sonra asenkron persist) reddedildi çünkü veritabanının hiç almadığı bir düzenlemeyi onaylayabilir.</li>
+</ul>
+
+<h3>Önceki projelerden uygulanan dersler</h3>
+<table>
+  <tr><th>Chat projesi ödünü</th><th>Burada</th></tr>
+  <tr><td>Üç kopya <code>jwt.go</code>, iki serviste hiç yok</td><td><strong>Yapısal olarak çözüldü:</strong> Ay 1'den edge auth; hiçbir backend JWT doğrulamaz</td></tr>
+  <tr><td>Teslimat kuyruğu bellekte; çökme kuyruktaki teslimatları kaybeder</td><td><strong>Çözüldü:</strong> doc-service'te transactional outbox + notification-service'te kalıcı <code>next_attempt_at</code> retry (Ay 5)</td></tr>
+  <tr><td>Edge cache'te purge yok</td><td><strong>Genişletildi:</strong> değişmez varlıkların yanında purge ve revalidation'lı değişebilir <code>/p/:slug</code> (Ay 6)</td></tr>
+  <tr><td>Yazma frame'lerinde rate limiting yok</td><td><strong>Çözüldü:</strong> op'larda bağlantı başına token bucket, imleçler limit üstünde düşürülür (Ay 4)</td></tr>
+  <tr><td>Presence eventually consistent</td><td><strong>Atlatıldı:</strong> presence oturum başına bellek içi ve kesin, çünkü dokümanlar sticky</td></tr>
+  <tr><td>Ölü instance odalarını götürür; üyelik statik; sağlık yoklanır; webhook sırları düz; edge cache süreç başına</td><td><strong>Korundu</strong>, aynı gerekçeyle</td></tr>
+</table>
+<p><code>notification-api</code>'den: sabit pencere → kayan pencere (Ay 4); <code>time.Sleep</code> retry döngüsü → kalıcı takvim (Ay 5); tek süreçte cache invalidasyonu → instance'lar arası invalidasyon (Ay 4); hardcoded sırlar → varsayılansız zorunlu env değişkenleri (Ay 1).</p>
+
+<h2>12. Riskler ve önlemler</h2>
+<table>
+  <tr><th>Risk</th><th>Etki</th><th>Önlem</th></tr>
+  <tr><td>OT transform/compose hataları (Ay 2)</td><td>İki istemci sessizce farklı metinlere yakınsar; sonraki tüm aylar bozuk temele oturur</td><td><code>ot/</code> paketi ayın ilk ve tek işi; rastgele op üreteciyle 10 000 iterasyonluk fuzzer; tie-break kuralı için açık test; fuzzer geçmeden başka işe başlanmaz</td></tr>
+  <tr><td>Sticky routing ihlali (Ay 3)</td><td>İki instance aynı dokümanı sıralar, günlük bozulur</td><td>Route başına strateji tablosu; <code>(doc_id, version)</code> primary key veritabanı düzeyi güvence; <code>X-Doc-Instance</code> ile gözlemlenebilirlik testi</td></tr>
+  <tr><td>Olay kaybı (Ay 5)</td><td>Webhook hiç gitmez, sessiz veri tutarsızlığı</td><td>Outbox aynı transaction'da; <code>SKIP LOCKED</code> relay; <code>event_id</code> idempotency; <code>kill -9</code> senaryoları doğrulama bloğunda</td></tr>
+  <tr><td>Kimlik header sahteciliği</td><td>Bir kullanıcı başka kullanıcı gibi davranır</td><td>Trusted proxy istemci header'larını <strong>üzerine yazar</strong>; backend'ler <code>X-Gateway-Key</code> ister; sabit zamanlı karşılaştırma; Ay 1 doğrulamasında açık test</td></tr>
+  <tr><td>Kapsam kayması (zengin metin, offline, servis keşfi)</td><td>Ay takvimi kayar</td><td>Bilinen ödünler listesi baştan yazıldı; her ay "kavram mı, ürün özelliği mi" sorusuyla filtrelenir</td></tr>
+  <tr><td>Aylık takvim baskısı</td><td>Doğrulama ve README güncellemesi atlanır</td><td>Ay sonu ritüeli teslim tanımıdır; doğrulama bloğu çalıştırılmadan ay kapanmaz</td></tr>
+  <tr><td>Yerel ortam çakışmaları</td><td>Üç proje aynı anda çalışmaz</td><td>Portlar baştan ayrıştırıldı (9000+, 3308, 6381); compose dosyasında belgelendi</td></tr>
+</table>
+
+<h2>13. Mevcut durum ve sonraki adımlar</h2>
+<p><strong>16 Eylül 2026 itibarıyla</strong> (resmi başlangıç olan Ekim'den önce, hazırlık olarak):</p>
+<ul>
+  <li>README (tek doğruluk kaynağı) tamamlandı: dokuz kavram, mimari, veri modeli, API yüzeyi, tam OT spesifikasyonu, altı aylık yol haritası, kurallar ve ödünler.</li>
+  <li><strong>Ay 1 madde 1 tamamlandı:</strong> <code>go.work</code>, <code>docker-compose.yml</code> (MySQL 3308, Redis 6381), <code>db/gateway_schema.sql</code>, <code>db/doc_schema.sql</code>, <code>.gitignore</code>. Container'lar healthy, şemalar yüklendi ve canlı volume'a tekrar uygulanabilirliği doğrulandı.</li>
+  <li><strong>Ay 1 madde 2 tamamlandı:</strong> gateway auth — <code>/register</code>, <code>/login</code>, <code>/me</code>, <code>/admin/users</code>, <code>/health</code>; JWT (HS256, 24 saat, <code>user_id/role/exp</code>); <code>request_id</code> ve <code>logger</code> middleware (loglarda yalnızca path); admin middleware; varsayılansız sırlar. Birim testleri (validation, jwt, admin, request_id, user service) <code>-race</code> ile yeşil; MySQL'e karşı uçtan uca curl doğrulaması yapıldı.</li>
+</ul>
+<p><strong>Sonraki adımlar (sırayla):</strong></p>
+<ol>
+  <li>Ay 1 madde 3: <code>internal/proxy/trusted_proxy.go</code> portu ve <code>/documents*</code> reverse proxy'si.</li>
+  <li>Ay 1 madde 4: doc-service (<code>gateway_auth</code>, documents/members CRUD, admin, sayfalama).</li>
+  <li>Ay 1 madde 5-6: <code>editor.html</code> v1.</li>
+  <li>Ay 1 madde 7: yetki matrisi testleri; README Month 1 bölümünü "yapılan"a çevir; <code>Month 1: …</code> commit'i.</li>
+  <li>Ay 2'ye <code>doc-service/internal/ot/</code> ve fuzzer ile başla; fuzzer temiz geçmeden başka hiçbir şeye başlama.</li>
+</ol>
+
+</body>
+</html>

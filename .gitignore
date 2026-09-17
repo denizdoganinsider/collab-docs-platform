@@ -1,0 +1,4 @@
+*.log
+.DS_Store
+# publish-service local disk store (month 6)
+publish-service/data/

@@ -1,0 +1,8 @@
+go 1.26.1
+
+// notification-service (month 5) and publish-service (month 6) are added here
+// when their directories exist; `use` entries must point at real modules.
+use (
+	./doc-service
+	./gateway
+)
