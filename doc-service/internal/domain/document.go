@@ -2,10 +2,17 @@ package domain
 
 import "time"
 
+// Per-document roles (document_members.role).
 const (
 	RoleOwner  = "owner"
 	RoleEditor = "editor"
 	RoleViewer = "viewer"
+)
+
+// Global roles, as the gateway forwards them in X-User-Role.
+const (
+	RoleUser  = "user"
+	RoleAdmin = "admin"
 )
 
 // ValidMemberRole is what an owner may assign to someone else. "owner" is

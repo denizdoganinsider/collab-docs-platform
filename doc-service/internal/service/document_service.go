@@ -29,6 +29,9 @@ type MemberRepositoryInterface interface {
 const (
 	DefaultPerPage = 20
 	MaxPerPage     = 100
+	// MaxPage bounds the offset arithmetic: page*per_page must stay far from
+	// int64 overflow, which MySQL would reject as a negative OFFSET.
+	MaxPage        = 1_000_000
 	MaxTitleLength = 255
 )
 
@@ -63,6 +66,9 @@ func validateTitle(title string) (string, error) {
 func clampPage(page, perPage int) (int, int) {
 	if page < 1 {
 		page = 1
+	}
+	if page > MaxPage {
+		page = MaxPage
 	}
 	if perPage < 1 {
 		perPage = DefaultPerPage
@@ -147,6 +153,11 @@ func (s *DocumentService) Rename(docID, userID int64, title string) (*domain.Doc
 	}
 
 	doc, err := s.docs.GetByID(docID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Deleted by the owner between the permission check and the read
+		// back: an ordinary race, not a server error.
+		return nil, ErrForbidden
+	}
 	if err != nil {
 		return nil, err
 	}

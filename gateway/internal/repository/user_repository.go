@@ -2,9 +2,19 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
 
 	"collab-docs-platform/gateway/internal/domain"
+
+	"github.com/go-sql-driver/mysql"
 )
+
+// ErrDuplicateEmail is the unique index on users.email speaking: the loser
+// of two concurrent registrations of the same address lands here, not on the
+// service's read-then-insert check.
+var ErrDuplicateEmail = errors.New("duplicate email")
+
+const mysqlDuplicateEntry = 1062
 
 type UserRepository struct {
 	db *sql.DB
@@ -22,6 +32,10 @@ func (r *UserRepository) Create(user *domain.User) error {
 
 	result, err := r.db.Exec(query, user.Email, user.PasswordHash, user.Role)
 	if err != nil {
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlDuplicateEntry {
+			return ErrDuplicateEmail
+		}
 		return err
 	}
 

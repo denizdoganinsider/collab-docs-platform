@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"collab-docs-platform/gateway/internal/domain"
+	"collab-docs-platform/gateway/internal/repository"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -23,7 +24,7 @@ func newMockUserRepo() *mockUserRepo {
 
 func (m *mockUserRepo) Create(user *domain.User) error {
 	if _, exists := m.users[user.Email]; exists {
-		return errors.New("duplicate email")
+		return repository.ErrDuplicateEmail
 	}
 	user.ID = m.nextID
 	user.CreatedAt = time.Now()
@@ -149,6 +150,31 @@ func TestUserService_Login(t *testing.T) {
 		if !errors.Is(err, ErrInvalidCredentials) {
 			t.Errorf("Login(%q) error = %v, want ErrInvalidCredentials", tt.email, err)
 		}
+	}
+}
+
+// A repository failure is not "invalid credentials": it must surface so the
+// controller can log it and answer 500.
+type brokenRepo struct{ *mockUserRepo }
+
+func (brokenRepo) GetByEmail(string) (*domain.User, error) {
+	return nil, errors.New("connection reset")
+}
+
+func TestUserService_Login_DatabaseErrorPropagates(t *testing.T) {
+	svc := NewUserService(brokenRepo{newMockUserRepo()})
+	_, err := svc.Login("a@x.com", "Passw0rd1")
+	if err == nil || errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("error = %v, want the repository error, not ErrInvalidCredentials", err)
+	}
+}
+
+func TestUserService_Register_ValidationErrorsAreTyped(t *testing.T) {
+	svc := NewUserService(newMockUserRepo())
+	_, err := svc.Register("bad", "Passw0rd1")
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("error = %T %v, want *ValidationError", err, err)
 	}
 }
 

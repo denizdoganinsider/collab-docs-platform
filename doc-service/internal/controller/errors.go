@@ -53,12 +53,16 @@ func queryInt(c echo.Context, name string, fallback int) (int, error) {
 	return strconv.Atoi(raw)
 }
 
+// paging parses ?page= and ?per_page=. It does NOT write the response: a
+// helper that both writes and returns nil (c.JSON's success value) lets the
+// handler keep going after the 400 is already on the wire. The caller maps
+// the returned ValidationError with respondError and stops.
 func paging(c echo.Context) (page, perPage int, err error) {
 	if page, err = queryInt(c, "page", 1); err != nil {
-		return 0, 0, fail(c, http.StatusBadRequest, "invalid page parameter")
+		return 0, 0, &service.ValidationError{Msg: "invalid page parameter"}
 	}
 	if perPage, err = queryInt(c, "per_page", service.DefaultPerPage); err != nil {
-		return 0, 0, fail(c, http.StatusBadRequest, "invalid per_page parameter")
+		return 0, 0, &service.ValidationError{Msg: "invalid per_page parameter"}
 	}
 	return page, perPage, nil
 }

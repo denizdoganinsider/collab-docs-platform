@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"time"
 
 	"collab-docs-platform/gateway/internal/middleware"
 
@@ -35,8 +37,20 @@ func NewTrustedProxy(targetURL string, gatewayKey string) (echo.HandlerFunc, err
 	if err != nil {
 		return nil, err
 	}
+	// url.Parse accepts "doc-service:9001" (scheme "doc-service", no host)
+	// without complaint; the proxy would start, report healthy, and 502 every
+	// request. Fail at startup instead, like a missing secret does.
+	if (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+		return nil, fmt.Errorf("proxy target %q must be an http(s) URL with a host", targetURL)
+	}
 
 	rp := httputil.NewSingleHostReverseProxy(target)
+	// A backend that stops answering must not hold gateway goroutines
+	// forever. Headers only: the body timeout is left open for WebSocket
+	// streams (month 2).
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	rp.Transport = transport
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		slog.Error("proxy error", "service", "gateway", "target", targetURL, "path", r.URL.Path, "error", err)
 		w.Header().Set("Content-Type", "application/json")

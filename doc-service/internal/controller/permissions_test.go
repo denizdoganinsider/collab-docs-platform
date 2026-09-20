@@ -214,8 +214,19 @@ func TestEdgeAuthAndAdmin(t *testing.T) {
 	if s != http.StatusOK || page["per_page"] != float64(1) || page["documents"] == nil {
 		t.Errorf("admin list: %d %v", s, page)
 	}
-	if s, _, _ := c.do("GET", "/admin/documents?page=x", adminUser, "admin", nil); s != http.StatusBadRequest {
-		t.Errorf("bad page: %d, want 400", s)
+	// The 400 must be the WHOLE response: a helper that wrote the error and
+	// returned nil once let the handler append a 200 payload after it.
+	s, bad, _ := c.do("GET", "/admin/documents?page=x", adminUser, "admin", nil)
+	if s != http.StatusBadRequest || bad["error"] != "invalid page parameter" {
+		t.Errorf("bad page: %d %v, want 400 with a single error object", s, bad)
+	}
+	s, bad, _ = c.do("GET", "/documents?per_page=x", owner, "user", nil)
+	if s != http.StatusBadRequest || bad["error"] != "invalid per_page parameter" {
+		t.Errorf("bad per_page: %d %v, want 400 with a single error object", s, bad)
+	}
+	// An absurd page is clamped, not turned into a negative OFFSET (500).
+	if s, _, list := c.do("GET", "/documents?page=999999999999999999", owner, "user", nil); s != http.StatusOK || list == nil {
+		t.Errorf("huge page: %d, want 200 with an (empty) list", s)
 	}
 
 	// Validation.

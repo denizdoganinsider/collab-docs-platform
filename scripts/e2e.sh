@@ -184,6 +184,9 @@ req GET "/documents?page=2&per_page=2" "$TOKEN_C"
 expect "page 2 has the remaining 1" "1" "$(echo "$BODY" | jq length)"
 req GET "/documents?page=x" "$TOKEN_C"
 expect "bad page -> 400" "400" "$STATUS"
+expect "bad page body is exactly one error object" "invalid page parameter" "$(printf '%s' "$BODY" | jq -r .error 2>/dev/null)"
+req GET "/documents?page=999999999999999999" "$TOKEN_C"
+expect "huge page is clamped, not a 500" "200" "$STATUS"
 
 # ---- admin -----------------------------------------------------------------
 say "admin"

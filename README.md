@@ -869,6 +869,34 @@ Exit criteria — all met: the permission matrix test passes (`DOCS_TEST_DSN` se
 `editor.html` logs in, creates, shares and opens; `Authorization` never appears
 in a doc-service log line; unknown paths are `404`; the e2e script is green.
 
+Review findings addressed (pre-push panel on the month commit, follow-up
+commit `Address review findings: …`):
+
+- **A helper that writes the response and returns `nil` is a trap.** doc-service's
+  `paging()` returned `c.JSON(400, …)`, whose success value is `nil`, so the list
+  handlers carried on after the 400 was on the wire and appended a 200 payload to
+  it. Fixed by returning a typed error and letting `respondError` write once; the
+  matrix test and the e2e script now assert the 400 body is a single object.
+- **Infrastructure failures were dressed up as client errors.** The gateway
+  answered a dead MySQL on `/register` with `400` plus the driver's message,
+  collapsed every repository error on `/login` into `401 invalid email or
+  password`, and turned a `/me` blip into a `401` the editor treats as "log out".
+  It now has a `respondError` like doc-service: validation `400`, duplicate `409`
+  (including the unique-index loser of a concurrent registration, MySQL 1062),
+  bad credentials `401`, deleted user `401`, everything else logged + bare `500`.
+- Smaller: rename's read-back maps a mid-delete `ErrNoRows` to `403` instead of
+  `500`; `page` is clamped to 1 000 000 so the offset cannot overflow into a
+  negative `OFFSET`; a `DOC_SERVICE_URLS` entry without an `http(s)://` scheme
+  and host fails at startup instead of 502-ing every request; both `sql.DB`
+  pools are bounded (25/25, 5 min lifetime) and both servers set
+  `ReadHeaderTimeout`/`IdleTimeout` (no `WriteTimeout`: month 2's WebSocket
+  streams); the proxy transport has a 30 s `ResponseHeaderTimeout`; doc-service's
+  global role constants moved to `domain` next to the per-document ones.
+- Not changed: the compose images are public `mysql:8`/`redis:7` (the org
+  container whitelist does not apply to this personal learning repo; the
+  predecessors use the same images) and the proxy keeps the inbound `Host`
+  (doc-service is not host-routed; revisit if an ingress ever sits in front).
+
 ### Month 2 — November 2026 — WebSocket *(planned)*
 
 Goal: two browsers editing the same document, live, on one doc-service instance.

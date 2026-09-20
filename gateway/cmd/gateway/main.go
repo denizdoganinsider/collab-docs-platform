@@ -51,6 +51,10 @@ func main() {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	// Slowloris and idle-keepalive bounds. No WriteTimeout: it would cut
+	// long-lived proxied streams (WebSocket, month 2).
+	e.Server.ReadHeaderTimeout = 10 * time.Second
+	e.Server.IdleTimeout = 120 * time.Second
 
 	e.Use(gatewayMiddleware.RequestIDMiddleware)
 	e.Use(gatewayMiddleware.LoggerMiddleware)

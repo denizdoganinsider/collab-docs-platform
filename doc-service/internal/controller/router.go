@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"time"
 
 	"collab-docs-platform/doc-service/internal/middleware"
 
@@ -23,6 +24,10 @@ func NewRouter(deps Dependencies) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	// Slowloris and idle-keepalive bounds. No WriteTimeout: it would cut the
+	// WebSocket streams that arrive in month 2.
+	e.Server.ReadHeaderTimeout = 10 * time.Second
+	e.Server.IdleTimeout = 120 * time.Second
 
 	e.Use(middleware.RequestIDMiddleware)
 	e.Use(middleware.LoggerMiddleware)

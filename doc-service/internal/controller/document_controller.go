@@ -38,7 +38,7 @@ func (dc *DocumentController) Create(c echo.Context) error {
 func (dc *DocumentController) List(c echo.Context) error {
 	page, perPage, err := paging(c)
 	if err != nil {
-		return err
+		return respondError(c, err)
 	}
 
 	userID, _ := currentUser(c)
@@ -104,7 +104,7 @@ func (dc *DocumentController) Delete(c echo.Context) error {
 func (dc *DocumentController) ListAll(c echo.Context) error {
 	page, perPage, err := paging(c)
 	if err != nil {
-		return err
+		return respondError(c, err)
 	}
 
 	result, err := dc.docs.ListAll(page, perPage)

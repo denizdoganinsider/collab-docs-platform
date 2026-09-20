@@ -110,3 +110,16 @@ func TestTrustedProxyBackendDownIs502JSON(t *testing.T) {
 		t.Errorf("body = %q, want {\"error\":...}", recorder.Body.String())
 	}
 }
+
+// url.Parse accepts "doc-service:9001" as scheme "doc-service"; the proxy
+// must refuse it at construction so main exits at startup.
+func TestTrustedProxyRejectsUnusableTarget(t *testing.T) {
+	for _, target := range []string{"doc-service:9001", "localhost:9001", "ftp://x", "http://"} {
+		if _, err := NewTrustedProxy(target, "k"); err == nil {
+			t.Errorf("NewTrustedProxy(%q) accepted an unusable target", target)
+		}
+	}
+	if _, err := NewTrustedProxy("http://localhost:9001", "k"); err != nil {
+		t.Errorf("NewTrustedProxy(valid) = %v", err)
+	}
+}

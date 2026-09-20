@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"collab-docs-platform/doc-service/internal/domain"
+
 	"github.com/labstack/echo/v4"
 )
 
@@ -15,9 +17,6 @@ const (
 
 	UserIDKey = "user_id"
 	RoleKey   = "role"
-
-	RoleUser  = "user"
-	RoleAdmin = "admin"
 )
 
 // GatewayAuth is edge auth seen from the backend: doc-service never sees a
@@ -44,8 +43,8 @@ func GatewayAuth(gatewayKey string) echo.MiddlewareFunc {
 			}
 
 			role := headers.Get(UserRoleHeader)
-			if role != RoleAdmin {
-				role = RoleUser
+			if role != domain.RoleAdmin {
+				role = domain.RoleUser
 			}
 
 			c.Set(UserIDKey, userID)
@@ -60,7 +59,7 @@ func GatewayAuth(gatewayKey string) echo.MiddlewareFunc {
 // depth, so a misrouted admin path is still refused here.
 func RequireAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		if role, _ := c.Get(RoleKey).(string); role != RoleAdmin {
+		if role, _ := c.Get(RoleKey).(string); role != domain.RoleAdmin {
 			return c.JSON(http.StatusForbidden, map[string]string{"error": "admin access required"})
 		}
 		return next(c)
