@@ -213,7 +213,7 @@ collab-docs-platform/
 ├── docker-compose.yml            mysql:8 (3308) + redis:7 (6381); month 6 adds the services
 ├── Makefile                      vet, test, test-db, e2e, check
 ├── scripts/
-│   └── e2e.sh                    end-to-end test over real HTTP (month 1: 67 checks)
+│   └── e2e.sh                    end-to-end test over real HTTP (72 checks)
 ├── docs/                         the shareable six-month plan (proje-plani.html / .pdf, Turkish)
 ├── db/
 │   ├── gateway_schema.sql        docs_gateway_db
@@ -892,15 +892,46 @@ commit `Address review findings: …`):
   `ReadHeaderTimeout`/`IdleTimeout` (no `WriteTimeout`: month 2's WebSocket
   streams); the proxy transport has a 30 s `ResponseHeaderTimeout`; doc-service's
   global role constants moved to `domain` next to the per-document ones.
+- Second round (commit `Fix review findings: …`): the `500` on a `/me` blip did
+  not help while the editor's `boot()` logged out on *any* error, so only a `401`
+  ends the session now and anything else is shown with the token kept; and the
+  password upper bound was 128 while bcrypt refuses input over 72 bytes, which
+  made a long password a logged `500` on `/register` — the limit is 72 bytes, a
+  `400`.
 - Not changed: the compose images are public `mysql:8`/`redis:7` (the org
   container whitelist does not apply to this personal learning repo; the
   predecessors use the same images) and the proxy keeps the inbound `Host`
   (doc-service is not host-routed; revisit if an ingress ever sits in front).
 
-### Month 2 — November 2026 — WebSocket *(planned)*
+### Month 2 — November 2026 — WebSocket *(in progress — started 5 October 2026, ahead of schedule)*
 
 Goal: two browsers editing the same document, live, on one doc-service instance.
 This is the OT month; the spec above is the contract.
+
+Done so far (items 1 and 5; the rest of the scope below is still planned):
+
+- `doc-service/internal/ot/` — `Component`/`Operation` with the README's JSON
+  array form (`UnmarshalJSON` refuses floats, booleans, null and nested values),
+  `BaseLen`/`TargetLen` in code points, `Validate` (zero components, adjacent
+  same-kind, delete-before-insert, `targetLen` bound), `Normalize` (idempotent;
+  delete+insert reordered to insert+delete), `Apply`, `Compose`, `Transform`.
+  Tests: table cases for every row of the compose and transform tables, the
+  four hand-written transform cases, `TestTransformConcurrentInsertLogOrderWins`
+  (which also proves that swapping the arguments converges on a *different*
+  text), and the two properties — `apply(apply(d,a),b) == apply(d,compose(a,b))`
+  and TP1 — over 10 000 random documents/ops each, with an alphabet that mixes
+  ASCII, Turkish letters, CJK and emoji so a byte/code-point slip fails the
+  property. `FuzzCompose`/`FuzzTransform` wrap the same checks for
+  `go test -fuzz`. The `-count=200` command below ran clean before anything else
+  in the month was started.
+- `GET /documents/:id/ops?from=<v>` — `OpRepository.ListAfter` (`version > from`,
+  ascending, `LIMIT 500`) and `Insert` (the writer's single-row append; a
+  duplicate `(doc_id, version)` comes back as the driver error, untouched),
+  `DocumentService.ListOps` (any member; `from < 0` is a 400),
+  `DocumentController.ListOps` (`from` parsed with the same no-write-then-nil
+  rule as `paging`). The op body is relayed as stored (`json.RawMessage`):
+  validation happens on the write path. The matrix test gained an `ops` row and
+  `TestListOps` seeds three rows through the repository; e2e is at 72 checks.
 
 Scope:
 
@@ -908,7 +939,7 @@ Scope:
    `Compose`, `Transform` with table tests, the two property tests (compose
    correctness, TP1) driven by a random-op generator, and the tie-break test.
    **Do this first and alone**; nothing else in the month is worth starting while
-   the fuzzer fails.
+   the fuzzer fails. *(done)*
 2. `internal/session/`: `Session` goroutine, op ring, writer goroutine with
    batching, snapshotter, idle close, shutdown snapshot.
 3. `internal/ws/`: upgrade handler (checks membership → role; `WS_ALLOWED_ORIGINS`
@@ -920,7 +951,7 @@ Scope:
 4. **Ticket exchange** ported from chat (`ticket_service.go`, `ws_ticket.go`): the
    token never travels in a URL; the gateway redeems the ticket, sets the identity
    headers on the outbound upgrade request, strips `?ticket=`.
-5. `GET /documents/:id/ops?from=` for catch-up.
+5. `GET /documents/:id/ops?from=` for catch-up. *(done)*
 6. `editor.html` v2: the state machine, textarea diffing, caret preservation,
    remote cursors (a coloured bar per user rendered in an overlay behind the
    textarea, or simply a list "user 2 at line 4" — the visual is not the lesson),
@@ -1367,7 +1398,9 @@ make test                      # go test ./gateway/... ./doc-service/... -race (
 make test-db                   # same, with DOCS_TEST_DSN pointing at the compose MySQL (permission matrix runs)
 make e2e                       # ./scripts/e2e.sh: both services + real HTTP + log assertions
 make check                     # vet + test-db + e2e
-go test ./doc-service/internal/ot/... -run Fuzz -count=1000     # the OT property tests (month 2), longer
+go test ./doc-service/internal/ot/ -race -count=1                  # OT table tests + 10 000-iteration compose/TP1 properties (1 000 with -short)
+go test ./doc-service/... -race -run 'TestCompose|TestTransform' -count=200
+go test ./doc-service/internal/ot/ -run XXX -fuzz=FuzzTransform -fuzztime=30s   # open-ended; FuzzCompose likewise
 ```
 
 `make` on macOS needs the Xcode license accepted once (`sudo xcodebuild -license accept`)

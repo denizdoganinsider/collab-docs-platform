@@ -127,6 +127,12 @@ expect "create with blank title -> 400" "400" "$STATUS"
 
 req GET "/documents/$DOC_ID" "$TOKEN_B"
 expect "B reads before share -> 403 (not 404)" "403" "$STATUS"
+req GET "/documents/$DOC_ID/ops" "$TOKEN_A"
+expect "ops catch-up on a fresh document -> 200 []" "200 []" "$STATUS $(echo "$BODY" | jq -c .)"
+req GET "/documents/$DOC_ID/ops" "$TOKEN_C"
+expect "ops as non-member -> 403" "403" "$STATUS"
+req GET "/documents/$DOC_ID/ops?from=x" "$TOKEN_A"
+expect "ops with bad from -> 400, single error object" "400 1" "$STATUS $(echo "$BODY" | jq -c 'select(.error) | 1')"
 req PUT "/documents/$DOC_ID/members/$ID_B" "$TOKEN_A" '{"role":"viewer"}'
 expect "A shares B as viewer -> 200" "200" "$STATUS"
 req GET "/documents/$DOC_ID" "$TOKEN_B"

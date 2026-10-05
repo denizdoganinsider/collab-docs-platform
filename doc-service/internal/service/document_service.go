@@ -19,6 +19,10 @@ type DocumentRepositoryInterface interface {
 	Delete(id int64) error
 }
 
+type OpRepositoryInterface interface {
+	ListAfter(docID, from int64, limit int) ([]domain.Op, error)
+}
+
 type MemberRepositoryInterface interface {
 	GetRole(docID, userID int64) (string, error)
 	List(docID int64) ([]domain.Member, error)
@@ -33,15 +37,19 @@ const (
 	// int64 overflow, which MySQL would reject as a negative OFFSET.
 	MaxPage        = 1_000_000
 	MaxTitleLength = 255
+	// MaxOpsPerPage bounds one catch-up read; a client further behind than
+	// this reads again from the last version it received.
+	MaxOpsPerPage = 500
 )
 
 type DocumentService struct {
 	docs    DocumentRepositoryInterface
 	members MemberRepositoryInterface
+	ops     OpRepositoryInterface
 }
 
-func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface) *DocumentService {
-	return &DocumentService{docs: docs, members: members}
+func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface, ops OpRepositoryInterface) *DocumentService {
+	return &DocumentService{docs: docs, members: members, ops: ops}
 }
 
 // DocumentView is GET /documents/:id: the document, the caller's role and
@@ -177,6 +185,18 @@ func (s *DocumentService) Delete(docID, userID int64) error {
 		return ErrForbidden
 	}
 	return s.docs.Delete(docID)
+}
+
+// ListOps is the catch-up read: every member (viewers included) may read the
+// op log after version `from`, oldest first, at most MaxOpsPerPage rows.
+func (s *DocumentService) ListOps(docID, userID, from int64) ([]domain.Op, error) {
+	if _, err := s.roleOf(docID, userID); err != nil {
+		return nil, err
+	}
+	if from < 0 {
+		return nil, invalid("from must be at least 0")
+	}
+	return s.ops.ListAfter(docID, from, MaxOpsPerPage)
 }
 
 type DocumentPage struct {

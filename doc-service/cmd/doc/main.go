@@ -25,8 +25,9 @@ func main() {
 
 	docRepo := repository.NewDocumentRepository(db)
 	memberRepo := repository.NewMemberRepository(db)
+	opRepo := repository.NewOpRepository(db)
 
-	docService := service.NewDocumentService(docRepo, memberRepo)
+	docService := service.NewDocumentService(docRepo, memberRepo, opRepo)
 	memberService := service.NewMemberService(memberRepo)
 
 	e := controller.NewRouter(controller.Dependencies{

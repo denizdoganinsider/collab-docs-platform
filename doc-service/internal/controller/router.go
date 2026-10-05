@@ -47,6 +47,8 @@ func NewRouter(deps Dependencies) *echo.Echo {
 	e.PATCH("/documents/:id", deps.Documents.Rename, auth)
 	e.DELETE("/documents/:id", deps.Documents.Delete, auth)
 
+	e.GET("/documents/:id/ops", deps.Documents.ListOps, auth)
+
 	e.GET("/documents/:id/members", deps.Members.List, auth)
 	e.PUT("/documents/:id/members/:user_id", deps.Members.Set, auth)
 	e.DELETE("/documents/:id/members/:user_id", deps.Members.Remove, auth)

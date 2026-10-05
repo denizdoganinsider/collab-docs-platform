@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Per-document roles (document_members.role).
 const (
@@ -51,4 +54,15 @@ type DocumentSummary struct {
 type Member struct {
 	UserID int64  `json:"user_id"`
 	Role   string `json:"role"`
+}
+
+// Op is one row of the append-only document_ops log: the operation that took
+// the document from Version-1 to Version. The op body stays raw on the read
+// path — it was validated when it was written, and the endpoint relays it.
+type Op struct {
+	DocID     int64           `json:"-"`
+	Version   int64           `json:"version"`
+	UserID    int64           `json:"user_id"`
+	Op        json.RawMessage `json:"op"`
+	CreatedAt time.Time       `json:"created_at"`
 }
