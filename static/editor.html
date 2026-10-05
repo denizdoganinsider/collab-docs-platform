@@ -157,7 +157,11 @@
       state.me = await api('GET', '/me');
       show(true);
       await loadDocs();
-    } catch (e) { logout(e.message); }
+    } catch (e) {
+      // api() has already logged out on a 401. Anything else (a 500 while
+      // the database is away) keeps the token: a reload retries.
+      if (state.token) status(e.message, true);
+    }
   }
 
   // ---- Documents ------------------------------------------------------

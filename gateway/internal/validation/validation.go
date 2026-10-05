@@ -19,15 +19,16 @@ func ValidateEmail(email string) error {
 }
 
 // ValidatePassword enforces the README policy: at least 8 characters, one
-// uppercase letter and one digit. The 128 upper bound keeps bcrypt input
-// bounded (bcrypt silently truncates at 72 bytes; refusing is more honest).
+// uppercase letter and one digit. The upper bound is bcrypt's own: it refuses
+// input over 72 bytes (ErrPasswordTooLong), so the limit is counted in bytes
+// and rejected here as a 400 instead of surfacing from the hash as a 500.
 func ValidatePassword(password string) error {
 	if len(password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
 
-	if len(password) > 128 {
-		return errors.New("password must be at most 128 characters")
+	if len(password) > 72 {
+		return errors.New("password must be at most 72 bytes")
 	}
 
 	var hasUpper, hasDigit bool
