@@ -2,8 +2,14 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+// ErrVersionTaken: a document_ops row for this (doc_id, version) already
+// exists. Another writer got there first; the caller's in-memory state is
+// behind the log and must be rebuilt from it.
+var ErrVersionTaken = errors.New("document version already written")
 
 // Per-document roles (document_members.role).
 const (

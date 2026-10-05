@@ -2,9 +2,14 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
+
+	"github.com/go-sql-driver/mysql"
 
 	"collab-docs-platform/doc-service/internal/domain"
 )
+
+const mysqlDuplicateEntry = 1062
 
 type OpRepository struct {
 	db *sql.DB
@@ -24,6 +29,34 @@ func (r *OpRepository) Insert(docID, version, userID int64, op []byte) error {
 		docID, version, userID, op,
 	)
 	return err
+}
+
+// InsertBatch appends ops in one transaction: all of them or none. A
+// duplicate (doc_id, version) comes back as domain.ErrVersionTaken so the
+// session can tell "someone else wrote this version" from a broken database.
+func (r *OpRepository) InsertBatch(docID int64, ops []domain.Op) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO document_ops (doc_id, version, user_id, op) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, op := range ops {
+		if _, err := stmt.Exec(docID, op.Version, op.UserID, []byte(op.Op)); err != nil {
+			var myErr *mysql.MySQLError
+			if errors.As(err, &myErr) && myErr.Number == mysqlDuplicateEntry {
+				return domain.ErrVersionTaken
+			}
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ListAfter returns the ops with version > from, oldest first, at most limit

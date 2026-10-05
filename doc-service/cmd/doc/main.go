@@ -13,6 +13,7 @@ import (
 	"collab-docs-platform/doc-service/internal/controller"
 	"collab-docs-platform/doc-service/internal/repository"
 	"collab-docs-platform/doc-service/internal/service"
+	"collab-docs-platform/doc-service/internal/session"
 )
 
 func main() {
@@ -29,6 +30,14 @@ func main() {
 
 	docService := service.NewDocumentService(docRepo, memberRepo, opRepo)
 	memberService := service.NewMemberService(memberRepo)
+
+	limits := session.DefaultLimits()
+	limits.MaxCodepoints = cfg.DocMaxCodepoints
+	limits.RingSize = cfg.OpRingSize
+	limits.SnapshotEveryOps = cfg.SnapshotEveryOps
+	limits.SnapshotEvery = time.Duration(cfg.SnapshotEverySeconds) * time.Second
+	limits.Idle = time.Duration(cfg.SessionIdleSeconds) * time.Second
+	sessions := session.NewManager(repository.NewSessionStore(docRepo, opRepo), limits)
 
 	e := controller.NewRouter(controller.Dependencies{
 		GatewayKey: cfg.GatewayKey,
@@ -51,6 +60,12 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Sessions first: pending ops are written, dirty documents snapshotted
+	// and sockets closed with 1001 before the listener goes away.
+	if err := sessions.Shutdown(ctx); err != nil {
+		slog.Error("session shutdown", "error", err)
+	}
 
 	if err := e.Shutdown(ctx); err != nil {
 		slog.Error("shutdown", "error", err)

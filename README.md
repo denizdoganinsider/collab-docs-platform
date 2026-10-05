@@ -578,7 +578,8 @@ inserted range.
 document state; ordering is the goroutine's serial execution. This is the same
 structural guarantee as the chat project's `Room.run()`.
 
-State: `content []rune`, `version int64`, `ring` of the last `OP_RING_SIZE=1000`
+State: `content string` with its length in code points kept beside it (`ot.Apply`
+takes and returns a string), `version int64`, `ring` of the last `OP_RING_SIZE=1000`
 `(version, op)` pairs, `clients map[*Client]role`, `pendingSince` (ops since last
 snapshot), `dirty bool`.
 
@@ -908,7 +909,7 @@ commit `Address review findings: …`):
 Goal: two browsers editing the same document, live, on one doc-service instance.
 This is the OT month; the spec above is the contract.
 
-Done so far (items 1 and 5; the rest of the scope below is still planned):
+Done so far (items 1, 2 and 5; the rest of the scope below is still planned):
 
 - `doc-service/internal/ot/` — `Component`/`Operation` with the README's JSON
   array form (`UnmarshalJSON` refuses floats, booleans, null and nested values),
@@ -932,6 +933,49 @@ Done so far (items 1 and 5; the rest of the scope below is still planned):
   rule as `paging`). The op body is relayed as stored (`json.RawMessage`):
   validation happens on the write path. The matrix test gained an `ops` row and
   `TestListOps` seeds three rows through the repository; e2e is at 72 checks.
+- `doc-service/internal/session/` — `Manager` (registry, one `Session` per open
+  document) and `Session` (one goroutine, channels in, no mutex on document
+  state), behind two small interfaces: `Store` (load, ops after a version,
+  append a batch, snapshot) and `Client` (`UserID`, non-blocking `Send`, `Close`
+  with a code), so the package is tested with a fake of each and knows nothing
+  of sockets. `repository.SessionStore` is the real `Store`:
+  `OpRepository.InsertBatch` (one transaction; MySQL 1062 becomes
+  `domain.ErrVersionTaken`) and `DocumentRepository.Snapshot` (the monotonic
+  `version < ?` update). Decisions the spec left open:
+  - **One trip to the database carries the queued ops and, when due, the
+    snapshot of the version they end at.** The writer runs one job at a time, so
+    a snapshot can never be ahead of the log, and batching needs no timer: what
+    queued while the writer was busy is the next batch.
+  - **Backpressure bound**: 256 ops applied in memory and not yet committed
+    (`Limits.MaxPending`, not an environment variable); at the bound the session
+    stops selecting on the frame channel, so the read pumps block in `Deliver`.
+  - **A duplicate version on insert** closes every socket with `4409` and drops
+    the session (memory is behind the log; reload is the only honest answer).
+    Any other insert error is the spec's `1011`.
+  - **A full send buffer** closes that client with `4409`.
+  - **A client that joins while an op is uncommitted** gets it in its snapshot
+    frame and is skipped when the `op` frame goes out (`joinedAt`), otherwise it
+    would apply it twice. Its snapshot is then briefly ahead of the database; a
+    crash in that window drops every socket, and the reconnect snapshot resets it.
+  - **An op that fits alone but not after transformation** (two users filling
+    the last free code points) is answered with `error{code:"too_large"}` and
+    `4400`.
+  - Cursor frames go through a 20/s token bucket per socket; the rest are dropped
+    without a reply.
+  The limits are read in `config` (`DOC_MAX_CODEPOINTS`, `OP_RING_SIZE`,
+  `SNAPSHOT_EVERY_OPS`, `SNAPSHOT_EVERY_SECONDS`, `SESSION_IDLE_SECONDS`; a value
+  that is set but not a positive integer stops startup). `main.go` builds the
+  manager and calls its `Shutdown` before the HTTP server's, but nothing opens a
+  session yet: that is item 3's upgrade handler, and with it the membership,
+  title and delete notifications from the HTTP handlers. The ack-latency
+  measurement in the design notes waits for real sockets too. Tests: 31 cases
+  with `-race` (persist before ack, log-order tie-break, every close code, batch
+  sizes, backpressure, snapshot triggers, idle drop and reopen from the log,
+  shutdown) and a property — 2 000 random edits against current and stale
+  versions, after which the log folded over the first snapshot must equal memory.
+  `repository/session_store_test.go` runs the two SQL guarantees against MySQL
+  (`DOCS_TEST_DSN`): a batch over a taken version writes nothing, and a snapshot
+  never moves a document backwards.
 
 Scope:
 
@@ -941,7 +985,7 @@ Scope:
    **Do this first and alone**; nothing else in the month is worth starting while
    the fuzzer fails. *(done)*
 2. `internal/session/`: `Session` goroutine, op ring, writer goroutine with
-   batching, snapshotter, idle close, shutdown snapshot.
+   batching, snapshotter, idle close, shutdown snapshot. *(done)*
 3. `internal/ws/`: upgrade handler (checks membership → role; `WS_ALLOWED_ORIGINS`
    with the chat project's "missing Origin is allowed" rule), `Client` with read
    and write pumps (`pongWait` 60 s, `writeWait` 10 s, `SetReadLimit(OP_MAX_BYTES)`),
@@ -1398,6 +1442,7 @@ make test                      # go test ./gateway/... ./doc-service/... -race (
 make test-db                   # same, with DOCS_TEST_DSN pointing at the compose MySQL (permission matrix runs)
 make e2e                       # ./scripts/e2e.sh: both services + real HTTP + log assertions
 make check                     # vet + test-db + e2e
+go test ./doc-service/internal/session/ -race -count=1             # session: fake store + fake clients, incl. 2 000 random stale ops folded against the log (200 with -short)
 go test ./doc-service/internal/ot/ -race -count=1                  # OT table tests + 10 000-iteration compose/TP1 properties (1 000 with -short)
 go test ./doc-service/... -race -run 'TestCompose|TestTransform' -count=200
 go test ./doc-service/internal/ot/ -run XXX -fuzz=FuzzTransform -fuzztime=30s   # open-ended; FuzzCompose likewise
