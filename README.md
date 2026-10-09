@@ -213,7 +213,7 @@ collab-docs-platform/
 ├── docker-compose.yml            mysql:8 (3308) + redis:7 (6381); month 6 adds the services
 ├── Makefile                      vet, test, test-db, e2e, check
 ├── scripts/
-│   └── e2e.sh                    end-to-end test over real HTTP (72 checks)
+│   └── e2e.sh                    end-to-end test over real HTTP and WebSocket (104 checks)
 ├── docs/                         the shareable six-month plan (proje-plani.html / .pdf, Turkish)
 ├── db/
 │   ├── gateway_schema.sql        docs_gateway_db
@@ -237,6 +237,7 @@ collab-docs-platform/
 │       └── edgecache/            byte-bounded LRU + handler (m6)
 ├── doc-service/
 │   ├── cmd/doc/main.go
+│   ├── cmd/wsprobe/main.go       verification WebSocket client (stands in for websocat; used by e2e.sh)
 │   ├── config/
 │   └── internal/
 │       ├── controller/           document, member, router (shared by main and the matrix test), ops (m2)
@@ -246,7 +247,7 @@ collab-docs-platform/
 │       ├── middleware/           gateway_auth, request_id, logger, instance (m3)
 │       ├── ot/                   operation, apply, compose, transform  (+ exhaustive tests) (m2)
 │       ├── session/              per-document Session goroutine, op ring, writer, snapshotter (m2)
-│       ├── ws/                   handler, client (read/write pumps), message types (m2)
+│       ├── ws/                   handler (membership, Origin, upgrade), client (read/write pumps) (m2)
 │       └── dispatch/             bounded non-blocking queues (copied pattern) (m5)
 ├── notification-service/         (month 5) same layering; deliverer, signer, ssrf, fanout
 └── publish-service/              (month 6) render (goldmark), storage (content-addressed), slug map
@@ -403,7 +404,7 @@ column = when it first exists.
 | POST | `/register` | public | 1 | `{email,password}` → `201 {id,email,role}`; password policy: ≥ 8 chars, one upper, one digit |
 | POST | `/login` | public | 1 | → `{token}` (24 h, claims `user_id`, `role`) |
 | GET | `/me` | user | 1 | `{id,email,role}` |
-| POST | `/ws-ticket` | user | 2 | → `{ticket}` opaque, 30 s, single-use |
+| POST | `/ws-ticket` | user | 2 | → `201 {ticket, expires_in}` opaque, 30 s, single-use |
 | GET | `/ws?doc=<id>&ticket=<t>` | ticket | 2 | proxied to doc-service (consistent hash on `doc` from month 3) |
 | GET | `/admin/users` | admin | 1 | paginated |
 | GET | `/admin/documents` | admin | 1 | proxied to doc-service `/admin/documents` |
@@ -904,139 +905,230 @@ commit `Address review findings: …`):
   predecessors use the same images) and the proxy keeps the inbound `Host`
   (doc-service is not host-routed; revisit if an ingress ever sits in front).
 
-### Month 2 — November 2026 — WebSocket *(in progress — started 5 October 2026, ahead of schedule)*
+### Month 2 — November 2026 — WebSocket *(done, ahead of schedule: 5–9 October 2026)*
 
-Goal: two browsers editing the same document, live, on one doc-service instance.
-This is the OT month; the spec above is the contract.
+Goal was: two browsers editing the same document, live, on one doc-service
+instance, with the OT spec above as the contract. That is what exists. The
+month was pulled forward because month 1 had closed early and the spec was
+already written.
 
-Done so far (items 1, 2 and 5; the rest of the scope below is still planned):
+What was built, in the order the roadmap asked for (the OT core first and
+alone, nothing else until its fuzzer ran clean):
 
-- `doc-service/internal/ot/` — `Component`/`Operation` with the README's JSON
-  array form (`UnmarshalJSON` refuses floats, booleans, null and nested values),
-  `BaseLen`/`TargetLen` in code points, `Validate` (zero components, adjacent
-  same-kind, delete-before-insert, `targetLen` bound), `Normalize` (idempotent;
-  delete+insert reordered to insert+delete), `Apply`, `Compose`, `Transform`.
-  Tests: table cases for every row of the compose and transform tables, the
-  four hand-written transform cases, `TestTransformConcurrentInsertLogOrderWins`
-  (which also proves that swapping the arguments converges on a *different*
-  text), and the two properties — `apply(apply(d,a),b) == apply(d,compose(a,b))`
-  and TP1 — over 10 000 random documents/ops each, with an alphabet that mixes
-  ASCII, Turkish letters, CJK and emoji so a byte/code-point slip fails the
-  property. `FuzzCompose`/`FuzzTransform` wrap the same checks for
-  `go test -fuzz`. The `-count=200` command below ran clean before anything else
-  in the month was started.
-- `GET /documents/:id/ops?from=<v>` — `OpRepository.ListAfter` (`version > from`,
-  ascending, `LIMIT 500`) and `Insert` (the writer's single-row append; a
-  duplicate `(doc_id, version)` comes back as the driver error, untouched),
-  `DocumentService.ListOps` (any member; `from < 0` is a 400),
-  `DocumentController.ListOps` (`from` parsed with the same no-write-then-nil
-  rule as `paging`). The op body is relayed as stored (`json.RawMessage`):
-  validation happens on the write path. The matrix test gained an `ops` row and
-  `TestListOps` seeds three rows through the repository; e2e is at 72 checks.
-- `doc-service/internal/session/` — `Manager` (registry, one `Session` per open
-  document) and `Session` (one goroutine, channels in, no mutex on document
-  state), behind two small interfaces: `Store` (load, ops after a version,
-  append a batch, snapshot) and `Client` (`UserID`, non-blocking `Send`, `Close`
-  with a code), so the package is tested with a fake of each and knows nothing
-  of sockets. `repository.SessionStore` is the real `Store`:
-  `OpRepository.InsertBatch` (one transaction; MySQL 1062 becomes
-  `domain.ErrVersionTaken`) and `DocumentRepository.Snapshot` (the monotonic
-  `version < ?` update). Decisions the spec left open:
-  - **One trip to the database carries the queued ops and, when due, the
-    snapshot of the version they end at.** The writer runs one job at a time, so
-    a snapshot can never be ahead of the log, and batching needs no timer: what
-    queued while the writer was busy is the next batch.
-  - **Backpressure bound**: 256 ops applied in memory and not yet committed
-    (`Limits.MaxPending`, not an environment variable); at the bound the session
-    stops selecting on the frame channel, so the read pumps block in `Deliver`.
-  - **A duplicate version on insert** closes every socket with `4409` and drops
-    the session (memory is behind the log; reload is the only honest answer).
-    Any other insert error is the spec's `1011`.
-  - **A full send buffer** closes that client with `4409`.
-  - **A client that joins while an op is uncommitted** gets it in its snapshot
-    frame and is skipped when the `op` frame goes out (`joinedAt`), otherwise it
-    would apply it twice. Its snapshot is then briefly ahead of the database; a
-    crash in that window drops every socket, and the reconnect snapshot resets it.
-  - **An op that fits alone but not after transformation** (two users filling
-    the last free code points) is answered with `error{code:"too_large"}` and
-    `4400`.
-  - Cursor frames go through a 20/s token bucket per socket; the rest are dropped
-    without a reply.
-  The limits are read in `config` (`DOC_MAX_CODEPOINTS`, `OP_RING_SIZE`,
-  `SNAPSHOT_EVERY_OPS`, `SNAPSHOT_EVERY_SECONDS`, `SESSION_IDLE_SECONDS`; a value
-  that is set but not a positive integer stops startup). `main.go` builds the
-  manager and calls its `Shutdown` before the HTTP server's, but nothing opens a
-  session yet: that is item 3's upgrade handler, and with it the membership,
-  title and delete notifications from the HTTP handlers. The ack-latency
-  measurement in the design notes waits for real sockets too. Tests: 31 cases
-  with `-race` (persist before ack, log-order tie-break, every close code, batch
-  sizes, backpressure, snapshot triggers, idle drop and reopen from the log,
-  shutdown) and a property — 2 000 random edits against current and stale
-  versions, after which the log folded over the first snapshot must equal memory.
-  `repository/session_store_test.go` runs the two SQL guarantees against MySQL
-  (`DOCS_TEST_DSN`): a batch over a taken version writes nothing, and a snapshot
-  never moves a document backwards.
+1. **`doc-service/internal/ot/`** — `Component`/`Operation` with the README's
+   JSON array form (`UnmarshalJSON` refuses floats, booleans, null and nested
+   values), `BaseLen`/`TargetLen` in code points, `Validate` (zero components,
+   adjacent same-kind, delete-before-insert, `targetLen` bound), `Normalize`
+   (idempotent; delete+insert reordered to insert+delete), `Apply`, `Compose`,
+   `Transform`. Tests: table cases for every row of the compose and transform
+   tables, the four hand-written transform cases,
+   `TestTransformConcurrentInsertLogOrderWins` (which also proves that swapping
+   the arguments converges on a *different* text), and the two properties —
+   `apply(apply(d,a),b) == apply(d,compose(a,b))` and TP1 — over 10 000 random
+   documents/ops each, with an alphabet that mixes ASCII, Turkish letters, CJK
+   and emoji so a byte/code-point slip fails the property. `FuzzCompose`/
+   `FuzzTransform` wrap the same checks for `go test -fuzz`. The `-count=200`
+   command below ran clean before anything else in the month was started.
+2. **`internal/session/`** — `Manager` (registry, one `Session` per open
+   document) and `Session` (one goroutine, channels in, no mutex on document
+   state), behind two small interfaces: `Store` (load, ops after a version,
+   append a batch, snapshot) and `Client` (`UserID`, non-blocking `Send`, `Close`
+   with a code), so the package is tested with a fake of each and knows nothing
+   of sockets. `repository.SessionStore` is the real `Store`:
+   `OpRepository.InsertBatch` (one transaction; MySQL 1062 becomes
+   `domain.ErrVersionTaken`) and `DocumentRepository.Snapshot` (the monotonic
+   `version < ?` update). Decisions the spec left open:
+   - **One trip to the database carries the queued ops and, when due, the
+     snapshot of the version they end at.** The writer runs one job at a time, so
+     a snapshot can never be ahead of the log, and batching needs no timer: what
+     queued while the writer was busy is the next batch.
+   - **Backpressure bound**: 256 ops applied in memory and not yet committed
+     (`Limits.MaxPending`, not an environment variable); at the bound the session
+     stops selecting on the frame channel, so the read pumps block in `Deliver`.
+   - **A duplicate version on insert** closes every socket with `4409` and drops
+     the session (memory is behind the log; reload is the only honest answer).
+     Any other insert error is the spec's `1011`.
+   - **A full send buffer** (64 frames) closes that client with `4409`.
+   - **A client that joins while an op is uncommitted** gets it in its snapshot
+     frame and is skipped when the `op` frame goes out (`joinedAt`), otherwise it
+     would apply it twice. Its snapshot is then briefly ahead of the database; a
+     crash in that window drops every socket, and the reconnect snapshot resets it.
+   - **An op that fits alone but not after transformation** (two users filling
+     the last free code points) is answered with `error{code:"too_large"}` and
+     `4400`.
+   - Cursor frames go through a 20/s token bucket per socket; the rest are dropped
+     without a reply.
+   Tests: 31 cases with `-race` (persist before ack, log-order tie-break, every
+   close code, batch sizes, backpressure, snapshot triggers, idle drop and reopen
+   from the log, shutdown) and a property — 2 000 random edits against current
+   and stale versions, after which the log folded over the first snapshot must
+   equal memory. `repository/session_store_test.go` runs the two SQL guarantees
+   against MySQL: a batch over a taken version writes nothing, and a snapshot
+   never moves a document backwards.
+3. **`internal/ws/`** — `Handler.Serve` (`GET /ws?doc=`): the document id and
+   the caller's membership are checked **before** the upgrade, so a refusal is
+   an HTTP status (`400`, `403`) and only the Origin check happens inside the
+   upgrader (`WS_ALLOWED_ORIGINS`; a missing `Origin` is allowed, a foreign one
+   is `403`). `SetReadLimit(OP_MAX_BYTES)` — gorilla answers an oversized frame
+   with `1009` on its own. `Client` is `session.Client` over a socket: a
+   64-frame send buffer, `Close` that only records the code and signals the
+   write pump (the session calls it from its own goroutine and must not wait),
+   a read pump that decodes into `session.Inbound` and blocks in `Deliver` under
+   backpressure, a write pump that is the only writer (frames, pings every 54 s
+   with `pongWait` 60 s, and finally the close frame). JSON that does not parse
+   is `1003`; JSON of the wrong shape (a float in an op, a string for `v`) is
+   `4400`. The HTTP handlers tell the session what changed on the same instance:
+   `PATCH` → `title` frame, `PUT members` → role swap in place, `DELETE members`
+   → `4003`, `DELETE document` → `4004` (rows first, sockets second).
+4. **Ticket exchange** ported from chat: `service/ticket_service.go` (32 random
+   bytes, 30 s, delete-on-read, reaper), `controller/ticket_controller.go`
+   (`POST /ws-ticket` → `201 {ticket, expires_in}`), `middleware/ws_ticket.go`.
+   The one change from chat: the gateway does not mint a second JWT for the
+   backend — it sets the same context keys `JWTMiddleware` sets, and the trusted
+   proxy turns them into `X-User-ID`/`X-User-Role` on the outbound upgrade
+   request, exactly like every other route. `?ticket=` is stripped before the
+   proxy; the e2e script greps both logs for the ticket value and finds nothing.
+   `httputil.ReverseProxy` pipes the upgraded connection both ways with no code
+   of its own.
+5. **`GET /documents/:id/ops?from=<v>`** — `OpRepository.ListAfter`
+   (`version > from`, ascending, `LIMIT 500`), `DocumentService.ListOps` (any
+   member; `from < 0` is a `400`), the op body relayed as stored
+   (`json.RawMessage`): validation happens on the write path.
+6. **`static/editor.html` v2** — the OT core ported to JavaScript (`apply`,
+   `compose`, `transform`, `normalize`, all over `Array.from` arrays so positions
+   are code points; `window.__ot` exposes them for a console check), the
+   three-state client exactly as specified, textarea diffing by longest common
+   prefix/suffix into one op per `input` event, caret preservation through
+   `transformPos` (UTF-16 offsets converted at the boundary both ways), remote
+   cursors as a list (`user 2 at line 4, col 7`, transformed through every op
+   that arrives), presence list, a `saved / saving… / saving… (edits queued)`
+   indicator, and reconnect with a fresh ticket on every close except
+   `4003`/`4004` (backoff 1 → 2 → 4 → 8 → 10 s). A snapshot that arrives while
+   an op is outstanding drops it and says so. `error{forbidden}` after a
+   downgrade resets the textarea to the server's text and reconnects, because the
+   dropped op will never be acked.
+7. **`GET /documents/:id` answers from the live session** when one is open on
+   this instance: `DocumentService` takes a `LiveDocuments` (the manager's
+   `View`) and overlays title, content and version on the stored row. The
+   permission check and the member list still come from the database.
+8. **`cmd/wsprobe`** — a small verification client (dial, send the frames
+   given as arguments, print every frame, print the close code) because
+   websocat is not installed everywhere; `scripts/e2e.sh` drives it.
+9. **Tests**: `internal/ws` — 14 cases over a real listener with a fake store and
+   a fake access check (every refusal before the upgrade, missing vs foreign
+   Origin, op → ack + relay + late-joiner snapshot, viewer forbidden with the
+   socket kept, unknown frame non-fatal, `1003`/`4400`/`1009`, second op before
+   the ack, title/membership/delete events, shutdown `1001` + snapshot, presence
+   on leave), plus two database-backed ones (`DOCS_TEST_DSN`): membership and
+   persist-before-ack over the real repositories, and the ack-latency
+   measurement below. `gateway` — ticket service (6 cases, ported) and the
+   ticket middleware (4). The permission matrix builds a real manager. The e2e
+   script gained a month-2 block: **104 checks**, including a `kill -9` of
+   doc-service between an ack and a reconnect.
 
-Scope:
+Things that differed from the plan, and the lesson in each:
 
-1. `doc-service/internal/ot/`: `Operation`, `Validate`, `Normalize`, `Apply`,
-   `Compose`, `Transform` with table tests, the two property tests (compose
-   correctness, TP1) driven by a random-op generator, and the tie-break test.
-   **Do this first and alone**; nothing else in the month is worth starting while
-   the fuzzer fails. *(done)*
-2. `internal/session/`: `Session` goroutine, op ring, writer goroutine with
-   batching, snapshotter, idle close, shutdown snapshot. *(done)*
-3. `internal/ws/`: upgrade handler (checks membership → role; `WS_ALLOWED_ORIGINS`
-   with the chat project's "missing Origin is allowed" rule), `Client` with read
-   and write pumps (`pongWait` 60 s, `writeWait` 10 s, `SetReadLimit(OP_MAX_BYTES)`),
-   slow-consumer eviction (a full send buffer closes the socket, as in chat —
-   for an editor this is right: a client that cannot keep up will be behind and
-   must reload anyway).
-4. **Ticket exchange** ported from chat (`ticket_service.go`, `ws_ticket.go`): the
-   token never travels in a URL; the gateway redeems the ticket, sets the identity
-   headers on the outbound upgrade request, strips `?ticket=`.
-5. `GET /documents/:id/ops?from=` for catch-up. *(done)*
-6. `editor.html` v2: the state machine, textarea diffing, caret preservation,
-   remote cursors (a coloured bar per user rendered in an overlay behind the
-   textarea, or simply a list "user 2 at line 4" — the visual is not the lesson),
-   presence list, reconnect with backoff.
-7. `GET /documents/:id` answers from the live session when one is open on this
-   instance (so it is never behind the sockets).
+- **The snapshot is written the moment the last socket leaves**, not only on
+  the interval or the op count. The first e2e draft expected `documents.version`
+  to still be `0` after a probe had disconnected, and was wrong: the session's
+  `afterLeave` marks a dirty document for its final snapshot and the writer does
+  it before the idle timer runs. The check now holds a socket open while it
+  looks at the database, then asserts the snapshot after the socket is gone.
+- **`lsof -ti :9001` also matches the gateway.** Killing "whatever has port
+  9001" with `-9` while a browser was connected killed the gateway too, because
+  its proxied WebSocket connection *to* 9001 matches. The e2e script kills the
+  listener only (`-sTCP:LISTEN`); the browser tabs reconnected on their own once
+  the gateway was back, and converged (same hash, same version).
+- **Chrome throttles a background tab's timers to one per second**, so a
+  concurrent-typing check driven by `setTimeout` in two tabs is not concurrent:
+  the background tab trickles one op per second while the foreground tab races.
+  The run still converged (both tabs identical at every observation, 91 then 93
+  versions), but the real concurrency proof is the e2e block (two probes
+  editing at the same base version, `[5," world"]` and `["> ",5]` → `> hello
+  world`) and the server-side test `TestOpIsAckedAndRelayed`.
+- **One op in flight per client is what makes the batching measurable.** With
+  a single client the writer never batches (the next op is only sent after the
+  ack), so the single-client numbers below are one round trip each; batching
+  shows up only with several sockets.
+- **The membership check moved in front of the upgrade** (the roadmap said
+  "upgrade handler checks membership → role"): a `403` is readable by curl and
+  by the browser's `onerror`, a close code after a `101` is not, and nothing is
+  allocated for a stranger.
 
-Design notes:
+Design notes, now with numbers:
 
-- Persist-before-ack is the month's big decision; write down the measured ack
-  latency with a single client and with the writer batching under load.
-- Why one goroutine per document and not a mutex: the transform-apply-log sequence
-  must be atomic per document, and a goroutine makes it impossible to forget the
-  lock. It also makes the `run()` loop the single place ordering is defined, which
-  month 3 relies on.
-- Cursor frames are never persisted or acked; the chat project's typing-indicator
-  argument.
+- **Persist-before-ack, measured** (`TestDBAckLatency`, compose MySQL on this
+  Mac, `-race` on): one client sending 200 ops sequentially — p50 1.3 ms, p90
+  1.9 ms, p99 3.9 ms; eight sockets sending 50 ops each at once — 400 ops in
+  361 ms, p50 5 ms, p90 12 ms, p99 45 ms. The concurrent p50 is higher because
+  an ack waits for the batch its op landed in, and the batch waits for the
+  commit before it; it is still one database round trip per *batch*, not per op.
+- Why one goroutine per document and not a mutex: the transform-apply-log
+  sequence must be atomic per document, and a goroutine makes it impossible to
+  forget the lock. It also makes the `run()` loop the single place ordering is
+  defined, which month 3 relies on.
+- Cursor frames are never persisted or acked; the chat project's
+  typing-indicator argument.
+- The HTTP side notifies the session *after* the row change. For `DELETE` that
+  leaves a window in which an op already handed to the writer is inserted for a
+  document whose rows are gone (no foreign key stops it). Listed under
+  trade-offs; the alternative (stop the session first, then delete) has the
+  mirror-image window.
 
-Verification:
+Verification — run against `docker compose up -d`, both services started as in
+*Running locally*, output as observed on 2026-10-09 (`wsprobe` stands in for
+websocat; `go run ./cmd/wsprobe` from `doc-service/`):
 
 ```bash
+TOKEN_A=$(curl -s -X POST localhost:9000/login -H "$JSON" -d '{"email":"a@test.com","password":"Passw0rd1"}' | jq -r .token)
+DOC=$(curl -s -X POST localhost:9000/documents -H "$JSON" -H "Authorization: Bearer $TOKEN_A" -d '{"title":"Live"}' | jq -r .id)
 TICKET=$(curl -s -X POST localhost:9000/ws-ticket -H "Authorization: Bearer $TOKEN_A" | jq -r .ticket)
-websocat -v "ws://localhost:9000/ws?doc=$DOC&ticket=$TICKET"
-# first frame => {"type":"snapshot","v":0,"content":"","role":"owner",...}
-{"type":"op","v":0,"op":["hello"],"seq":1}
-# => {"type":"ack","v":1,"seq":1}
-# a second websocat as B (viewer) sees {"type":"op","v":1,"user_id":1,"op":["hello"]}
-# B sends an op => {"type":"error","code":"forbidden"}
-# upgrade B to editor; both type concurrently at the same position: both sides
-# converge on the same text, log order first
+# {"ticket":"3f9c…(64 hex)","expires_in":30}
 
-docker exec -i docs_mysql mysql -uroot -proot -e \
-  'SELECT version, JSON_COMPACT(op) FROM docs_service_db.document_ops WHERE doc_id=1 ORDER BY version'
-# 101 ops => documents.version = 100, content = folded text (snapshot fired at 100)
+wsprobe "ws://localhost:9000/ws?doc=$DOC&ticket=$TICKET" '{"type":"op","v":0,"op":["hello"],"seq":1}'
+# {"type":"snapshot","doc_id":1,"title":"Live","v":0,"content":"","role":"owner","members":[{"user_id":1,"role":"owner"}],"presence":[{"user_id":1}]}
+# {"type":"ack","v":1,"seq":1}
+wsprobe "ws://localhost:9000/ws?doc=$DOC&ticket=$TICKET"
+# http 401                                        (the ticket was spent)
+grep -c "$TICKET" gateway.log doc-service.log
+# 0 0
 
-kill -9 $(lsof -ti :9001); restart; reconnect => snapshot at the last acked version, nothing lost
+# B (viewer) sees the text and is refused an edit; the socket stays open
+wsprobe "ws://localhost:9000/ws?doc=$DOC&ticket=$TICKET_B" '{"type":"op","v":1,"op":[5,"!"],"seq":1}'
+# {"type":"snapshot",…,"v":1,"content":"hello","role":"viewer",…}
+# {"type":"error","code":"forbidden","message":"viewers cannot edit"}
+
+# B upgraded to editor; A and B edit the same base version at the same position
+wsprobe --wait 3s "…ticket=$T_A" '{"type":"op","v":1,"op":[5," world"],"seq":7}' &
+wsprobe          "…ticket=$T_B" '{"type":"op","v":1,"op":["> ",5],"seq":1}'
+# B: {"type":"ack","v":3,"seq":1}
+# A: {"type":"ack","v":2,"seq":7}  {"type":"op","v":3,"user_id":2,"op":["> ",11],"seq":1}
+curl -s localhost:9000/documents/$DOC -H "Authorization: Bearer $TOKEN_A" | jq -r '"\(.version) \(.content)"'
+# 3 > hello world                                 (from the live session)
+curl -s "localhost:9000/documents/$DOC/ops?from=1" -H "Authorization: Bearer $TOKEN_A" | jq -c '[.[].version]'
+# [2,3]
+
+wsprobe "…" '{"type":'                                   # => close 1003 malformed JSON
+wsprobe "…" '{"type":"op","v":99,"op":["x"],"seq":1}'    # => close 4400 bad_version
+wsprobe --origin http://evil.test "…"                    # => http 403
+
+kill -9 $(lsof -ti TCP:9001 -sTCP:LISTEN); restart; wsprobe "…"
+# {"type":"snapshot",…,"v":3,"content":"> hello world",…}   nothing acked was lost
+
 go test ./doc-service/... -race -run 'TestCompose|TestTransform' -count=200
+# ok
+./scripts/e2e.sh
+# passed: 104  failed: 0
 ```
 
-Exit criteria: two browser tabs typing simultaneously converge every time; the
-fuzzers run 10 000 iterations clean; `kill -9` loses no acked op.
+In Chrome (two tabs, `a@test.com` owner and `b@test.com` editor): A typed
+`Merhaba from A — çğş 🙂`, B saw it and `user 1 at line 2, col 1`; both tabs then
+inserted at position 0 in a loop; at every observation both held the same text
+(same length, same hash) at the same version; after doc-service was killed and
+restarted both tabs went `connecting` → `live` and stayed equal.
+
+Exit criteria — all met: two tabs typing converge every time; the fuzzers run
+10 000 iterations clean; `kill -9` loses no acked op (e2e and by hand).
 
 ### Month 3 — December 2026 — Load Balancer *(planned)*
 
@@ -1440,9 +1532,10 @@ docker compose down -v && docker compose up -d                             # or 
 ```bash
 make test                      # go test ./gateway/... ./doc-service/... -race (database tests skip)
 make test-db                   # same, with DOCS_TEST_DSN pointing at the compose MySQL (permission matrix runs)
-make e2e                       # ./scripts/e2e.sh: both services + real HTTP + log assertions
+make e2e                       # ./scripts/e2e.sh: both services + real HTTP + WebSocket (cmd/wsprobe) + kill -9 + log assertions
 make check                     # vet + test-db + e2e
 go test ./doc-service/internal/session/ -race -count=1             # session: fake store + fake clients, incl. 2 000 random stale ops folded against the log (200 with -short)
+go test ./doc-service/internal/ws/ -race -count=1                  # real listener + fake store; with DOCS_TEST_DSN also persist-before-ack and the ack-latency log (-v)
 go test ./doc-service/internal/ot/ -race -count=1                  # OT table tests + 10 000-iteration compose/TP1 properties (1 000 with -short)
 go test ./doc-service/... -race -run 'TestCompose|TestTransform' -count=200
 go test ./doc-service/internal/ot/ -run XXX -fuzz=FuzzTransform -fuzztime=30s   # open-ended; FuzzCompose likewise
@@ -1468,6 +1561,18 @@ To be revised each month. Starting list, decided up front, plus what month 1 add
 - *m1* **Test users and the e2e run share the dev database.** The e2e script uses
   unique emails per run and deletes what it created; a crash mid-run can leave
   `e2e-*` rows behind. `docker compose down -v` is the reset.
+- *m2* **A delete can leave orphan op rows.** `DELETE /documents/:id` removes
+  the rows and then tells the session; an op the writer was inserting in that
+  instant lands in `document_ops` for a document that no longer exists. Nothing
+  reads it (the document is gone and ids are not reused), so it is a few stray
+  rows, not a correctness problem.
+- *m2* **Remote cursors are a list, not an overlay.** `user 2 at line 4, col 7`
+  is exact and transformed through every op; drawing a coloured bar inside a
+  `<textarea>` is a rendering exercise, not a lesson.
+- *m2* **A role downgrade is learned on the next edit.** The session keeps the
+  socket and refuses the op with `error{forbidden}`; the editor then reloads
+  from the server. A `role` frame would be cleaner; the spec did not define one
+  and the behaviour is correct either way.
 
 - **Plain text only.** No rich text, no undo/redo, no comments. OT over
   attributed text is a different (bigger) algorithm; the system-design lessons do

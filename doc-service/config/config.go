@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -21,10 +22,15 @@ type Config struct {
 
 	// Live-session limits (README, "Limits").
 	DocMaxCodepoints     int
+	OpMaxBytes           int
 	OpRingSize           int
 	SnapshotEveryOps     int
 	SnapshotEverySeconds int
 	SessionIdleSeconds   int
+
+	// Origins allowed to open a WebSocket. A missing Origin header is
+	// allowed (native clients); a present one must be in this list.
+	WSAllowedOrigins []string
 }
 
 func LoadConfig() *Config {
@@ -36,10 +42,13 @@ func LoadConfig() *Config {
 		DBDSN:      getEnv("DB_DSN", "root:root@tcp(localhost:3308)/docs_service_db?parseTime=true"),
 
 		DocMaxCodepoints:     positiveInt("DOC_MAX_CODEPOINTS", 1<<20),
+		OpMaxBytes:           positiveInt("OP_MAX_BYTES", 65536),
 		OpRingSize:           positiveInt("OP_RING_SIZE", 1000),
 		SnapshotEveryOps:     positiveInt("SNAPSHOT_EVERY_OPS", 100),
 		SnapshotEverySeconds: positiveInt("SNAPSHOT_EVERY_SECONDS", 30),
 		SessionIdleSeconds:   positiveInt("SESSION_IDLE_SECONDS", 60),
+
+		WSAllowedOrigins: getEnvList("WS_ALLOWED_ORIGINS", []string{"http://localhost:9000"}),
 	}
 }
 
@@ -75,4 +84,23 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getEnvList(key string, fallback []string) []string {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+
+	var values []string
+	for part := range strings.SplitSeq(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	if len(values) == 0 {
+		return fallback
+	}
+
+	return values
 }

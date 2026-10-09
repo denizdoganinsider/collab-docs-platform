@@ -56,6 +56,16 @@ func (m *Manager) Lookup(docID int64) *Session {
 	return m.sessions[docID]
 }
 
+// View returns the document as the live session holds it; false when no
+// session is open on this instance (the caller reads the database).
+func (m *Manager) View(docID int64) (View, bool) {
+	s := m.Lookup(docID)
+	if s == nil {
+		return View{}, false
+	}
+	return s.View()
+}
+
 func (m *Manager) open(docID int64) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

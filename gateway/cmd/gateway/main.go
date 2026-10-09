@@ -35,6 +35,9 @@ func main() {
 	userService := service.NewUserService(userRepo)
 	authController := controller.NewAuthController(userService)
 	adminController := controller.NewAdminController(userService)
+	tickets := service.NewTicketService()
+	defer tickets.Close()
+	ticketController := controller.NewTicketController(tickets)
 
 	// Month 1: a single doc-service instance behind a plain reverse proxy.
 	// Month 3 replaces this with a pool and per-route balancing strategies.
@@ -85,6 +88,7 @@ func main() {
 	admin := []echo.MiddlewareFunc{gatewayMiddleware.JWTMiddleware, gatewayMiddleware.AdminMiddleware}
 
 	e.GET("/me", authController.Me, user...)
+	e.POST("/ws-ticket", ticketController.Issue, user...)
 	e.GET("/admin/users", adminController.ListUsers, admin...)
 
 	// doc-service. Authentication happened above; authorization (per-document
@@ -93,6 +97,14 @@ func main() {
 	e.Any("/documents", docProxy, user...)
 	e.Any("/documents/*", docProxy, user...)
 	e.GET("/admin/documents", docProxy, admin...)
+
+	// A browser cannot put a Bearer token on a WebSocket handshake, so /ws
+	// takes the one-shot ticket from POST /ws-ticket instead. The middleware
+	// establishes the identity the same way JWTMiddleware does, the proxy
+	// forwards it as headers on the upgrade request, and the ticket never
+	// travels past this process. httputil.ReverseProxy pipes the upgraded
+	// connection both ways.
+	e.GET("/ws", docProxy, gatewayMiddleware.WSTicketMiddleware(tickets))
 
 	go func() {
 		slog.Info("gateway listening", "port", cfg.ServerPort)

@@ -4,16 +4,26 @@ import (
 	"net/http"
 
 	"collab-docs-platform/doc-service/internal/service"
+	"collab-docs-platform/doc-service/internal/session"
 
 	"github.com/labstack/echo/v4"
 )
 
-type DocumentController struct {
-	docs *service.DocumentService
+// Sessions is the live-session registry as the HTTP handlers see it: after a
+// write lands in the database, the session open on this instance (if any) is
+// told, so sockets learn about a rename, a role change or a delete without
+// polling. Hash routing (month 3) guarantees the session is on this instance.
+type Sessions interface {
+	Lookup(docID int64) *session.Session
 }
 
-func NewDocumentController(docs *service.DocumentService) *DocumentController {
-	return &DocumentController{docs: docs}
+type DocumentController struct {
+	docs     *service.DocumentService
+	sessions Sessions
+}
+
+func NewDocumentController(docs *service.DocumentService, sessions Sessions) *DocumentController {
+	return &DocumentController{docs: docs, sessions: sessions}
 }
 
 type titleRequest struct {
@@ -83,6 +93,9 @@ func (dc *DocumentController) Rename(c echo.Context) error {
 	if err != nil {
 		return respondError(c, err)
 	}
+	if s := dc.sessions.Lookup(docID); s != nil {
+		s.TitleChanged(doc.Title)
+	}
 
 	return c.JSON(http.StatusOK, doc)
 }
@@ -96,6 +109,11 @@ func (dc *DocumentController) Delete(c echo.Context) error {
 	userID, _ := currentUser(c)
 	if err := dc.docs.Delete(docID, userID); err != nil {
 		return respondError(c, err)
+	}
+	// Rows first, sockets second: the session closes with 4004 and writes
+	// nothing more.
+	if s := dc.sessions.Lookup(docID); s != nil {
+		s.Deleted()
 	}
 
 	return c.NoContent(http.StatusNoContent)

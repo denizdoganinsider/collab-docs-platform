@@ -14,6 +14,7 @@ import (
 	"collab-docs-platform/doc-service/internal/repository"
 	"collab-docs-platform/doc-service/internal/service"
 	"collab-docs-platform/doc-service/internal/session"
+	"collab-docs-platform/doc-service/internal/ws"
 )
 
 func main() {
@@ -28,9 +29,6 @@ func main() {
 	memberRepo := repository.NewMemberRepository(db)
 	opRepo := repository.NewOpRepository(db)
 
-	docService := service.NewDocumentService(docRepo, memberRepo, opRepo)
-	memberService := service.NewMemberService(memberRepo)
-
 	limits := session.DefaultLimits()
 	limits.MaxCodepoints = cfg.DocMaxCodepoints
 	limits.RingSize = cfg.OpRingSize
@@ -39,11 +37,15 @@ func main() {
 	limits.Idle = time.Duration(cfg.SessionIdleSeconds) * time.Second
 	sessions := session.NewManager(repository.NewSessionStore(docRepo, opRepo), limits)
 
+	docService := service.NewDocumentService(docRepo, memberRepo, opRepo, sessions)
+	memberService := service.NewMemberService(memberRepo)
+
 	e := controller.NewRouter(controller.Dependencies{
 		GatewayKey: cfg.GatewayKey,
 		InstanceID: cfg.InstanceID,
-		Documents:  controller.NewDocumentController(docService),
-		Members:    controller.NewMemberController(memberService),
+		Documents:  controller.NewDocumentController(docService, sessions),
+		Members:    controller.NewMemberController(memberService, sessions),
+		WebSocket:  ws.NewHandler(sessions, docService, cfg.WSAllowedOrigins, cfg.OpMaxBytes, cfg.InstanceID).Serve,
 	})
 
 	go func() {

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"collab-docs-platform/doc-service/internal/domain"
+	"collab-docs-platform/doc-service/internal/session"
 )
 
 type DocumentRepositoryInterface interface {
@@ -21,6 +22,13 @@ type DocumentRepositoryInterface interface {
 
 type OpRepositoryInterface interface {
 	ListAfter(docID, from int64, limit int) ([]domain.Op, error)
+}
+
+// LiveDocuments is the session manager as the read path sees it: the
+// document a live session holds is ahead of the stored snapshot, so a read
+// that found one answers from it and is never behind the sockets.
+type LiveDocuments interface {
+	View(docID int64) (session.View, bool)
 }
 
 type MemberRepositoryInterface interface {
@@ -46,10 +54,11 @@ type DocumentService struct {
 	docs    DocumentRepositoryInterface
 	members MemberRepositoryInterface
 	ops     OpRepositoryInterface
+	live    LiveDocuments
 }
 
-func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface, ops OpRepositoryInterface) *DocumentService {
-	return &DocumentService{docs: docs, members: members, ops: ops}
+func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface, ops OpRepositoryInterface, live LiveDocuments) *DocumentService {
+	return &DocumentService{docs: docs, members: members, ops: ops, live: live}
 }
 
 // DocumentView is GET /documents/:id: the document, the caller's role and
@@ -139,7 +148,27 @@ func (s *DocumentService) Get(docID, userID int64) (*DocumentView, error) {
 		return nil, err
 	}
 
+	// A session open on this instance holds ops the snapshot does not have
+	// yet; its view is the truth the sockets see.
+	if live, ok := s.live.View(docID); ok {
+		doc.Title, doc.Content, doc.Version = live.Title, live.Content, live.Version
+	}
+
 	return &DocumentView{Document: *doc, Role: role, Members: members}, nil
+}
+
+// Membership is the WebSocket upgrade's permission check: the caller's role
+// (ErrForbidden for a non-member) and the member list for the snapshot frame.
+func (s *DocumentService) Membership(docID, userID int64) (string, []domain.Member, error) {
+	role, err := s.roleOf(docID, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	members, err := s.members.List(docID)
+	if err != nil {
+		return "", nil, err
+	}
+	return role, members, nil
 }
 
 func (s *DocumentService) Rename(docID, userID int64, title string) (*domain.DocumentSummary, error) {

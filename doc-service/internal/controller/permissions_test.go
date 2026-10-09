@@ -14,8 +14,10 @@ import (
 	"collab-docs-platform/doc-service/internal/middleware"
 	"collab-docs-platform/doc-service/internal/repository"
 	"collab-docs-platform/doc-service/internal/service"
+	"collab-docs-platform/doc-service/internal/session"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/labstack/echo/v4"
 )
 
 // The permission matrix runs against a real MySQL: the checks under test are
@@ -82,11 +84,13 @@ func newTestServer(t *testing.T) *client {
 	docRepo := repository.NewDocumentRepository(db)
 	memberRepo := repository.NewMemberRepository(db)
 	opRepo := repository.NewOpRepository(db)
+	sessions := session.NewManager(repository.NewSessionStore(docRepo, opRepo), session.DefaultLimits())
 	e := NewRouter(Dependencies{
 		GatewayKey: testKey,
 		InstanceID: "doc-test",
-		Documents:  NewDocumentController(service.NewDocumentService(docRepo, memberRepo, opRepo)),
-		Members:    NewMemberController(service.NewMemberService(memberRepo)),
+		Documents:  NewDocumentController(service.NewDocumentService(docRepo, memberRepo, opRepo, sessions), sessions),
+		Members:    NewMemberController(service.NewMemberService(memberRepo), sessions),
+		WebSocket:  func(c echo.Context) error { return c.NoContent(http.StatusNotImplemented) },
 	})
 
 	srv := httptest.NewServer(e)
