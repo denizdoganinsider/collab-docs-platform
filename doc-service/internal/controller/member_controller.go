@@ -9,11 +9,12 @@ import (
 )
 
 type MemberController struct {
-	members *service.MemberService
+	members  *service.MemberService
+	sessions Sessions
 }
 
-func NewMemberController(members *service.MemberService) *MemberController {
-	return &MemberController{members: members}
+func NewMemberController(members *service.MemberService, sessions Sessions) *MemberController {
+	return &MemberController{members: members, sessions: sessions}
 }
 
 type roleRequest struct {
@@ -55,6 +56,9 @@ func (mc *MemberController) Set(c echo.Context) error {
 	if err != nil {
 		return respondError(c, err)
 	}
+	if s := mc.sessions.Lookup(docID); s != nil {
+		s.MemberChanged(member.UserID, member.Role)
+	}
 
 	return c.JSON(http.StatusOK, member)
 }
@@ -72,6 +76,9 @@ func (mc *MemberController) Remove(c echo.Context) error {
 	userID, _ := currentUser(c)
 	if err := mc.members.Remove(docID, userID, targetID); err != nil {
 		return respondError(c, err)
+	}
+	if s := mc.sessions.Lookup(docID); s != nil {
+		s.MemberChanged(targetID, "")
 	}
 
 	return c.NoContent(http.StatusNoContent)

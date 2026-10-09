@@ -24,15 +24,20 @@
   #docs li { padding: 6px 8px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
   #docs li:hover, #docs li.active { background: #eef3ff; }
   #docs li .role { color: #777; font-size: 12px; }
-  #members li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #eee; }
+  #members li, #cursors li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #eee; }
   #members li .uid { flex: 1; }
-  textarea { width: 100%; box-sizing: border-box; height: 60vh; padding: 10px; border: 1px solid #bbb; border-radius: 3px; resize: vertical; background: #fafafa; }
+  textarea { width: 100%; box-sizing: border-box; height: 60vh; padding: 10px; border: 1px solid #bbb; border-radius: 3px; resize: vertical; background: #fff; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.4; }
+  textarea:read-only { background: #fafafa; }
   #title { font-size: 16px; font-weight: 600; flex: 1; }
-  .meta { color: #777; font-size: 12px; margin-bottom: 8px; }
+  .meta { color: #777; font-size: 12px; margin-bottom: 8px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #bbb; margin-right: 4px; vertical-align: middle; }
+  .dot.live { background: #2a9d4b; } .dot.wait { background: #e0a800; } .dot.off { background: #b33; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
   #status { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; font-size: 12px; background: #fff8e1; border-top: 1px solid #e0c97a; display: none; }
   #status.error { background: #fdecea; border-color: #e0938d; }
   .hidden { display: none !important; }
   #auth { grid-column: 1 / -1; max-width: 420px; }
+  .small { color: #777; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -70,9 +75,14 @@
       <button id="rename" class="hidden">Rename</button>
       <button id="delete" class="danger hidden">Delete</button>
     </div>
-    <div class="meta" id="docMeta"></div>
-    <!-- Read-only in month 1. Month 2 turns this into the OT client. -->
-    <textarea id="content" disabled placeholder="(empty document — live editing arrives in month 2)"></textarea>
+    <div class="meta">
+      <span id="docMeta"></span>
+      <span><span class="dot" id="connDot"></span><span id="connText">offline</span></span>
+      <span id="syncText"></span>
+    </div>
+    <!-- The OT client (month 2): every input event becomes one op, every
+         server op is transformed against what is in flight. -->
+    <textarea id="content" readonly placeholder="(empty document)" spellcheck="false"></textarea>
   </section>
 
   <section id="membersPane" class="hidden">
@@ -83,6 +93,10 @@
       <select id="shareRole"><option value="viewer">viewer</option><option value="editor">editor</option></select>
       <button type="submit">Share</button>
     </form>
+    <h2 style="margin-top:16px">In the document</h2>
+    <ul id="presence"></ul>
+    <h2 style="margin-top:16px">Cursors</h2>
+    <ul id="cursors"></ul>
   </section>
 </main>
 
@@ -117,6 +131,352 @@
   }
   const fail = (e) => status(e.message, true);
 
+  // ---- OT (a port of doc-service/internal/ot) ---------------------------
+  // An op is an array: positive integer = retain, string = insert, negative
+  // integer = delete. Positions are code points, never UTF-16 units, so text
+  // is handled as arrays from Array.from (one entry per code point).
+  const cps = (s) => Array.from(s);
+  const isIns = (c) => typeof c === 'string';
+  const clen = (c) => isIns(c) ? cps(c).length : Math.abs(c);
+
+  function baseLen(op) { let n = 0; for (const c of op) if (!isIns(c)) n += clen(c); return n; }
+  function targetLen(op) { let n = 0; for (const c of op) if (!(typeof c === 'number' && c < 0)) n += clen(c); return n; }
+
+  // normalize: drop empties, merge neighbours of one kind, and put every
+  // insert before the delete it follows (the server refuses delete-then-insert).
+  function normalize(op) {
+    const out = [];
+    for (const c of op) {
+      if (c === 0 || c === '') continue;
+      if (isIns(c)) {
+        let i = out.length;
+        if (i > 0 && typeof out[i - 1] === 'number' && out[i - 1] < 0) i--;
+        if (i > 0 && isIns(out[i - 1])) { out[i - 1] += c; continue; }
+        out.splice(i, 0, c);
+      } else {
+        const n = out.length;
+        if (n > 0 && typeof out[n - 1] === 'number' && (out[n - 1] > 0) === (c > 0)) { out[n - 1] += c; continue; }
+        out.push(c);
+      }
+    }
+    return out;
+  }
+
+  // apply works on code point arrays and returns a new array.
+  function apply(doc, op) {
+    if (baseLen(op) !== doc.length) throw new Error(`ot: base length ${baseLen(op)} != document length ${doc.length}`);
+    const out = []; let pos = 0;
+    for (const c of op) {
+      if (isIns(c)) out.push(...cps(c));
+      else if (c > 0) { for (let i = 0; i < c; i++) out.push(doc[pos + i]); pos += c; }
+      else pos -= c;
+    }
+    return out;
+  }
+
+  // A cursor hands out components piecewise; inserts are held as arrays so
+  // they split at code point boundaries. Mirrors the Go `cursor`/`head`.
+  function cursor(op) {
+    const c = { op, i: 0, n: 0, s: [] };
+    c.empty = () => c.n === 0 && c.s.length === 0;
+    c.load = () => { if (c.empty() && c.i < c.op.length) { const k = c.op[c.i++]; if (isIns(k)) c.s = cps(k); else c.n = k; } };
+    c.done = () => c.empty() && c.i >= c.op.length;
+    return c;
+  }
+
+  function compose(a, b) {
+    if (targetLen(a) !== baseLen(b)) throw new Error('ot: compose length mismatch');
+    const out = [], ca = cursor(a), cb = cursor(b);
+    for (;;) {
+      ca.load(); cb.load();
+      if (ca.done() && cb.done()) break;
+      if (ca.n < 0) { out.push(ca.n); ca.n = 0; continue; }
+      if (cb.s.length) { out.push(cb.s.join('')); cb.s = []; continue; }
+      if (ca.done() || cb.done()) throw new Error('ot: compose length mismatch');
+      if (ca.n > 0 && cb.n > 0) { const m = Math.min(ca.n, cb.n); out.push(m); ca.n -= m; cb.n -= m; }
+      else if (ca.n > 0 && cb.n < 0) { const m = Math.min(ca.n, -cb.n); out.push(-m); ca.n -= m; cb.n += m; }
+      else if (ca.s.length && cb.n > 0) { const m = Math.min(ca.s.length, cb.n); out.push(ca.s.slice(0, m).join('')); ca.s = ca.s.slice(m); cb.n -= m; }
+      else if (ca.s.length && cb.n < 0) { const m = Math.min(ca.s.length, -cb.n); ca.s = ca.s.slice(m); cb.n += m; }
+    }
+    return normalize(out);
+  }
+
+  // transform(a, b) -> [a', b']; a's insert goes first on a tie. The server
+  // op is always `a` here, as the logged op is on the server: log order wins.
+  function transform(a, b) {
+    if (baseLen(a) !== baseLen(b)) throw new Error('ot: transform length mismatch');
+    const a2 = [], b2 = [], ca = cursor(a), cb = cursor(b);
+    for (;;) {
+      ca.load(); cb.load();
+      if (ca.done() && cb.done()) break;
+      if (ca.s.length) { a2.push(ca.s.join('')); b2.push(ca.s.length); ca.s = []; continue; }
+      if (cb.s.length) { a2.push(cb.s.length); b2.push(cb.s.join('')); cb.s = []; continue; }
+      if (ca.done() || cb.done()) throw new Error('ot: transform length mismatch');
+      if (ca.n > 0 && cb.n > 0) { const m = Math.min(ca.n, cb.n); a2.push(m); b2.push(m); ca.n -= m; cb.n -= m; }
+      else if (ca.n < 0 && cb.n < 0) { const m = Math.min(-ca.n, -cb.n); ca.n += m; cb.n += m; }
+      else if (ca.n > 0 && cb.n < 0) { const m = Math.min(ca.n, -cb.n); b2.push(-m); ca.n -= m; cb.n += m; }
+      else if (ca.n < 0 && cb.n > 0) { const m = Math.min(-ca.n, cb.n); a2.push(-m); ca.n += m; cb.n -= m; }
+    }
+    return [normalize(a2), normalize(b2)];
+  }
+
+  // transformPos moves a caret through an op: an insert before it shifts it,
+  // a delete spanning it clamps it to the deletion point.
+  function transformPos(pos, op) {
+    let i = 0, p = pos;
+    for (const c of op) {
+      if (isIns(c)) { const n = cps(c).length; if (i < p) p += n; i += n; }
+      else if (c > 0) i += c;
+      else { const n = -c; if (i < p) p -= Math.min(n, p - i); }
+    }
+    return p;
+  }
+
+  // diff turns a textarea change into one op by longest common prefix and
+  // suffix, in code points: [prefix, inserted?, -deleted?, suffix].
+  function diff(before, after) {
+    let p = 0;
+    while (p < before.length && p < after.length && before[p] === after[p]) p++;
+    let s = 0;
+    while (s < before.length - p && s < after.length - p && before[before.length - 1 - s] === after[after.length - 1 - s]) s++;
+    const inserted = after.slice(p, after.length - s).join('');
+    const deleted = before.length - p - s;
+    return normalize([p, inserted, -deleted, s]);
+  }
+
+  // ---- Client state machine (README, "Client state machine") -----------
+  // 'sync' | 'await' (outstanding) | 'buffer' (outstanding + buffer).
+  const live = {
+    ws: null, docId: null, version: 0, content: [], role: 'viewer',
+    state: 'sync', outstanding: null, buffer: null, seq: 0,
+    cursors: new Map(), presence: [], backoff: 1000, retry: null, closing: false,
+  };
+  const ta = $('content');
+  const canEdit = () => live.role === 'owner' || live.role === 'editor';
+
+  function sendFrame(f) { if (live.ws && live.ws.readyState === WebSocket.OPEN) live.ws.send(JSON.stringify(f)); }
+
+  function sendOp(op) { sendFrame({ type: 'op', v: live.version, op, seq: ++live.seq }); }
+
+  function localEdit(op) {
+    live.content = apply(live.content, op);
+    for (const [uid, c] of live.cursors) live.cursors.set(uid, { ...c, pos: transformPos(c.pos, op), sel: transformPos(c.sel, op) });
+    switch (live.state) {
+      case 'sync': sendOp(op); live.state = 'await'; live.outstanding = op; break;
+      case 'await': live.state = 'buffer'; live.buffer = op; break;
+      case 'buffer': live.buffer = compose(live.buffer, op); break;
+    }
+    renderSync(); renderCursors();
+  }
+
+  function serverOp(f) {
+    let sop = f.op;
+    if (live.state === 'await') {
+      const [s1, o1] = transform(sop, live.outstanding);
+      sop = s1; live.outstanding = o1;
+    } else if (live.state === 'buffer') {
+      const [s1, o1] = transform(sop, live.outstanding);
+      const [s2, b1] = transform(s1, live.buffer);
+      sop = s2; live.outstanding = o1; live.buffer = b1;
+    }
+    applyToTextarea(sop);
+    live.version = f.v;
+    renderMeta(); renderCursors();
+  }
+
+  function serverAck(f) {
+    live.version = f.v;
+    if (live.state === 'await') { live.state = 'sync'; live.outstanding = null; }
+    else if (live.state === 'buffer') { live.state = 'await'; live.outstanding = live.buffer; live.buffer = null; sendOp(live.outstanding); }
+    if (cursorPending) sendCursor();
+    renderMeta(); renderSync();
+  }
+
+  // ---- Textarea <-> code points ----------------------------------------
+  // selectionStart/End are UTF-16 offsets; everything else here is in code
+  // points, so convert at the boundary both ways.
+  let lastValue = [];
+  const toCP = (s, idx) => cps(s.slice(0, idx)).length;
+  const toUTF16 = (arr, cp) => arr.slice(0, cp).join('').length;
+
+  function applyToTextarea(op) {
+    const before = ta.value;
+    const selStart = transformPos(toCP(before, ta.selectionStart), op);
+    const selEnd = transformPos(toCP(before, ta.selectionEnd), op);
+    live.content = apply(live.content, op);
+    lastValue = live.content;
+    ta.value = live.content.join('');
+    ta.setSelectionRange(toUTF16(live.content, selStart), toUTF16(live.content, selEnd));
+    for (const [uid, c] of live.cursors) live.cursors.set(uid, { ...c, pos: transformPos(c.pos, op), sel: transformPos(c.sel, op) });
+  }
+
+  function setContent(arr) {
+    live.content = arr; lastValue = arr;
+    ta.value = arr.join('');
+  }
+
+  ta.addEventListener('input', () => {
+    if (!canEdit() || !live.ws) { ta.value = lastValue.join(''); return; }
+    const now = cps(ta.value);
+    const op = diff(lastValue, now);
+    lastValue = now;
+    if (!op.some((c) => isIns(c) || c < 0)) return;
+    try { localEdit(op); } catch (e) { fail(e); reconnect('local state diverged'); }
+    sendCursor();
+  });
+
+  // Cursor frames: ~20/s at most, only when something changed. While edits
+  // are buffered (not yet sent) the caret lives in text the server has not
+  // seen, so the frame waits for the ack that flushes the buffer.
+  let cursorTimer = null, lastCursor = '', cursorPending = false;
+  function sendCursor() {
+    if (!live.ws || cursorTimer) return;
+    cursorTimer = setTimeout(() => {
+      cursorTimer = null;
+      if (live.state === 'buffer') { cursorPending = true; return; }
+      cursorPending = false;
+      const pos = toCP(ta.value, ta.selectionStart), sel = toCP(ta.value, ta.selectionEnd);
+      const key = pos + ':' + sel;
+      if (key === lastCursor) return;
+      lastCursor = key;
+      sendFrame({ type: 'cursor', pos, sel });
+    }, 50);
+  }
+  document.addEventListener('selectionchange', () => { if (document.activeElement === ta) sendCursor(); });
+
+  // ---- Socket lifecycle -------------------------------------------------
+  function conn(kind, text) { $('connDot').className = 'dot ' + kind; $('connText').textContent = text; }
+
+  async function connect(docId) {
+    if (live.ws) return;
+    live.docId = docId; live.closing = false;
+    conn('wait', 'connecting');
+    let ticket;
+    try { ({ ticket } = await api('POST', '/ws-ticket')); } catch (e) { fail(e); scheduleReconnect(); return; }
+    if (live.docId !== docId) return;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${scheme}://${location.host}/ws?doc=${docId}&ticket=${ticket}`);
+    live.ws = ws;
+    ta.readOnly = true; // until the snapshot frame says what the role is
+    ws.onmessage = (ev) => {
+      let f; try { f = JSON.parse(ev.data); } catch { return; }
+      // A throw here would leave the client silently out of step with the
+      // server; a reconnect gets a fresh snapshot.
+      try { onFrame(f); } catch (e) { fail(e); reconnect('client state diverged'); }
+    };
+    ws.onclose = (ev) => {
+      if (live.ws !== ws) return;
+      live.ws = null;
+      ta.readOnly = true;
+      if (live.closing) { conn('', 'offline'); return; }
+      if (ev.code === 4003) { conn('off', 'access revoked'); status('your access to this document was revoked', true); closeDoc(); loadDocs().catch(fail); return; }
+      if (ev.code === 4004) { conn('off', 'deleted'); status('this document was deleted', true); closeDoc(); loadDocs().catch(fail); return; }
+      conn('wait', `reconnecting (${ev.code}${ev.reason ? ' ' + ev.reason : ''})`);
+      scheduleReconnect();
+    };
+    ws.onerror = () => {};
+  }
+
+  function scheduleReconnect() {
+    if (live.retry || live.closing || !live.docId) return;
+    const delay = live.backoff;
+    live.backoff = Math.min(live.backoff * 2, 10000);
+    live.retry = setTimeout(() => { live.retry = null; connect(live.docId); }, delay);
+  }
+
+  function reconnect(reason) {
+    if (!live.ws) return;
+    status(reason, true);
+    live.ws.close(4000, reason);
+  }
+
+  function disconnect() {
+    live.closing = true;
+    if (live.retry) { clearTimeout(live.retry); live.retry = null; }
+    if (live.ws) { const ws = live.ws; live.ws = null; ws.close(1000, 'leaving'); }
+    live.docId = null; live.backoff = 1000;
+    live.state = 'sync'; live.outstanding = null; live.buffer = null;
+    live.cursors.clear(); live.presence = [];
+    conn('', 'offline');
+  }
+
+  function onFrame(f) {
+    switch (f.type) {
+      case 'snapshot': {
+        const dropped = (live.outstanding ? 1 : 0) + (live.buffer ? 1 : 0);
+        if (dropped) status(`reconnected: ${dropped} unacknowledged local edit${dropped > 1 ? 's were' : ' was'} dropped`, true);
+        live.state = 'sync'; live.outstanding = null; live.buffer = null; live.backoff = 1000;
+        live.version = f.v; live.role = f.role; live.presence = f.presence || [];
+        live.cursors.clear();
+        setContent(cps(f.content));
+        ta.readOnly = !canEdit();
+        if (state.doc) { state.doc.title = f.title; state.doc.role = f.role; state.doc.members = f.members; $('title').value = f.title; renderDoc(); }
+        conn('live', 'live');
+        renderMeta(); renderSync(); renderPresence(); renderCursors();
+        break;
+      }
+      case 'ack': serverAck(f); break;
+      case 'op': serverOp(f); break;
+      case 'cursor': live.cursors.set(f.user_id, { pos: f.pos, sel: f.sel, v: f.v }); renderCursors(); break;
+      case 'presence':
+        live.presence = f.users || [];
+        for (const uid of [...live.cursors.keys()]) if (!live.presence.some((u) => u.user_id === uid)) live.cursors.delete(uid);
+        renderPresence(); renderCursors();
+        break;
+      case 'title':
+        if (state.doc) { state.doc.title = f.title; if (document.activeElement !== $('title')) $('title').value = f.title; }
+        loadDocs().catch(fail);
+        break;
+      case 'error':
+        status(`${f.code}: ${f.message}`, true);
+        if (f.code === 'forbidden') {
+          // The op was dropped server-side and no ack will come: fall back
+          // to the server's text and stop editing.
+          live.role = 'viewer'; ta.readOnly = true;
+          live.state = 'sync'; live.outstanding = null; live.buffer = null;
+          openDocMeta(state.doc.id).catch(fail);
+          reconnect('role changed; reloading');
+        }
+        break;
+    }
+  }
+
+  // ---- Rendering --------------------------------------------------------
+  function renderMeta() {
+    if (!state.doc) return;
+    $('docMeta').textContent = `document ${state.doc.id} · v${live.version} · your role: ${live.role}`;
+  }
+  function renderSync() {
+    $('syncText').textContent = live.state === 'sync' ? 'saved' : live.state === 'await' ? 'saving…' : 'saving… (edits queued)';
+  }
+  function renderPresence() {
+    const ul = $('presence'); ul.innerHTML = '';
+    for (const u of live.presence) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="swatch"></span><span></span>`;
+      li.firstChild.style.background = colour(u.user_id);
+      li.lastChild.textContent = `user ${u.user_id}` + (u.user_id === state.me.id ? ' (you)' : '');
+      ul.appendChild(li);
+    }
+  }
+  function renderCursors() {
+    const ul = $('cursors'); ul.innerHTML = '';
+    for (const [uid, c] of live.cursors) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="swatch"></span><span></span>`;
+      li.firstChild.style.background = colour(uid);
+      li.lastChild.textContent = `user ${uid} at ${lineCol(c.pos)}` + (c.sel > c.pos ? ` (${c.sel - c.pos} selected)` : '');
+      ul.appendChild(li);
+    }
+    if (live.cursors.size === 0) ul.innerHTML = '<li class="small">nobody else has a cursor here</li>';
+  }
+  function lineCol(pos) {
+    let line = 1, col = 1;
+    for (let i = 0; i < pos && i < live.content.length; i++) { if (live.content[i] === '\n') { line++; col = 1; } else col++; }
+    return `line ${line}, col ${col}`;
+  }
+  function colour(uid) { return `hsl(${(uid * 137) % 360} 60% 55%)`; }
+
   // ---- Auth -----------------------------------------------------------
   function creds() { return { email: $('email').value.trim(), password: $('password').value }; }
 
@@ -137,6 +497,7 @@
   $('logout').onclick = () => logout();
 
   function logout(msg) {
+    disconnect();
     state.token = null; state.me = null; state.doc = null;
     localStorage.removeItem('token');
     show(false);
@@ -191,33 +552,48 @@
     } catch (e) { fail(e); }
   };
 
+  // openDoc: metadata and members over HTTP, text over the socket. The
+  // snapshot frame is what fills the textarea; the HTTP content is shown
+  // until it arrives.
   async function openDoc(id) {
     try {
-      state.doc = await api('GET', `/documents/${id}`);
-      renderDoc();
+      if (state.doc && state.doc.id !== id) disconnect();
+      await openDocMeta(id);
+      if (!live.ws && live.docId !== id) { live.closing = false; await connect(id); }
       await loadDocs();
     } catch (e) { fail(e); }
   }
 
+  async function openDocMeta(id) {
+    state.doc = await api('GET', `/documents/${id}`);
+    if (!live.ws) { live.role = state.doc.role; live.version = state.doc.version; setContent(cps(state.doc.content)); ta.readOnly = true; }
+    renderDoc();
+  }
+
+  function closeDoc() {
+    disconnect();
+    state.doc = null;
+    $('editorPane').classList.add('hidden'); $('membersPane').classList.add('hidden');
+  }
+
   function renderDoc() {
     const d = state.doc;
-    const canEdit = d.role === 'owner' || d.role === 'editor';
+    const editor = d.role === 'owner' || d.role === 'editor';
     const isOwner = d.role === 'owner';
     $('editorPane').classList.remove('hidden');
     $('membersPane').classList.remove('hidden');
-    $('title').value = d.title;
-    $('title').disabled = !canEdit;
-    $('rename').classList.toggle('hidden', !canEdit);
+    if (document.activeElement !== $('title')) $('title').value = d.title;
+    $('title').disabled = !editor;
+    $('rename').classList.toggle('hidden', !editor);
     $('delete').classList.toggle('hidden', !isOwner);
-    $('docMeta').textContent = `document ${d.id} · version ${d.version} · your role: ${d.role} · updated ${new Date(d.updated_at).toLocaleString()}`;
-    $('content').value = d.content;
+    renderMeta(); renderSync();
     renderMembers();
   }
 
   $('rename').onclick = async () => {
     try {
       const d = await api('PATCH', `/documents/${state.doc.id}`, { title: $('title').value });
-      state.doc.title = d.title; state.doc.updated_at = d.updated_at;
+      state.doc.title = d.title;
       renderDoc(); await loadDocs(); status('renamed');
     } catch (e) { fail(e); }
   };
@@ -225,9 +601,9 @@
   $('delete').onclick = async () => {
     // No confirm(): a modal would block automation and this is a learning project.
     try {
-      await api('DELETE', `/documents/${state.doc.id}`);
-      state.doc = null;
-      $('editorPane').classList.add('hidden'); $('membersPane').classList.add('hidden');
+      const id = state.doc.id;
+      closeDoc();
+      await api('DELETE', `/documents/${id}`);
       await loadDocs(); status('deleted');
     } catch (e) { fail(e); }
   };
@@ -265,16 +641,21 @@
     try {
       await api('PUT', `/documents/${state.doc.id}/members/${userId}`, { role });
       $('shareUserId').value = '';
-      await openDoc(state.doc.id); status(`user ${userId} is now ${role}`);
+      await openDocMeta(state.doc.id); status(`user ${userId} is now ${role}`);
     } catch (e) { fail(e); }
   }
 
   async function removeMember(userId) {
     try {
       await api('DELETE', `/documents/${state.doc.id}/members/${userId}`);
-      await openDoc(state.doc.id); status(`user ${userId} removed`);
+      await openDocMeta(state.doc.id); status(`user ${userId} removed`);
     } catch (e) { fail(e); }
   }
+
+  window.addEventListener('beforeunload', () => { if (live.ws) { live.closing = true; live.ws.close(1000, 'unload'); } });
+
+  // Exposed for the browser-side checks of the OT port (see README).
+  window.__ot = { apply, compose, transform, normalize, diff, transformPos };
 
   boot();
 })();

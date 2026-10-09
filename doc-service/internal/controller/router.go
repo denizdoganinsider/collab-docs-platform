@@ -16,6 +16,9 @@ type Dependencies struct {
 	InstanceID string
 	Documents  *DocumentController
 	Members    *MemberController
+	// WebSocket upgrade handler (package ws); a handler func so this package
+	// does not import ws, which imports it.
+	WebSocket echo.HandlerFunc
 }
 
 // NewRouter wires every route. Only /health is reachable without the
@@ -46,6 +49,10 @@ func NewRouter(deps Dependencies) *echo.Echo {
 	e.GET("/documents/:id", deps.Documents.Get, auth)
 	e.PATCH("/documents/:id", deps.Documents.Rename, auth)
 	e.DELETE("/documents/:id", deps.Documents.Delete, auth)
+
+	e.GET("/documents/:id/ops", deps.Documents.ListOps, auth)
+
+	e.GET("/ws", deps.WebSocket, auth)
 
 	e.GET("/documents/:id/members", deps.Members.List, auth)
 	e.PUT("/documents/:id/members/:user_id", deps.Members.Set, auth)

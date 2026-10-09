@@ -14,8 +14,10 @@ import (
 	"collab-docs-platform/doc-service/internal/middleware"
 	"collab-docs-platform/doc-service/internal/repository"
 	"collab-docs-platform/doc-service/internal/service"
+	"collab-docs-platform/doc-service/internal/session"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/labstack/echo/v4"
 )
 
 // The permission matrix runs against a real MySQL: the checks under test are
@@ -27,6 +29,7 @@ const testKey = "test-gateway-key"
 type client struct {
 	t   *testing.T
 	url string
+	ops *repository.OpRepository // seeds document_ops directly: no writer exists yet
 }
 
 func (c *client) do(method, path string, userID int64, role string, body any) (int, map[string]any, []map[string]any) {
@@ -80,16 +83,19 @@ func newTestServer(t *testing.T) *client {
 
 	docRepo := repository.NewDocumentRepository(db)
 	memberRepo := repository.NewMemberRepository(db)
+	opRepo := repository.NewOpRepository(db)
+	sessions := session.NewManager(repository.NewSessionStore(docRepo, opRepo), session.DefaultLimits())
 	e := NewRouter(Dependencies{
 		GatewayKey: testKey,
 		InstanceID: "doc-test",
-		Documents:  NewDocumentController(service.NewDocumentService(docRepo, memberRepo)),
-		Members:    NewMemberController(service.NewMemberService(memberRepo)),
+		Documents:  NewDocumentController(service.NewDocumentService(docRepo, memberRepo, opRepo, sessions), sessions),
+		Members:    NewMemberController(service.NewMemberService(memberRepo), sessions),
+		WebSocket:  func(c echo.Context) error { return c.NoContent(http.StatusNotImplemented) },
 	})
 
 	srv := httptest.NewServer(e)
 	t.Cleanup(srv.Close)
-	return &client{t: t, url: srv.URL}
+	return &client{t: t, url: srv.URL, ops: opRepo}
 }
 
 // Users are bare ids: there is no users table in this schema and no FK, so
@@ -136,6 +142,7 @@ func TestPermissionMatrix(t *testing.T) {
 	rows := []row{
 		{"read", "GET", path, nil, map[int64]int{owner: 200, editor: 200, viewer: 200, stranger: 403}},
 		{"members", "GET", path + "/members", nil, map[int64]int{owner: 200, editor: 200, viewer: 200, stranger: 403}},
+		{"ops", "GET", path + "/ops", nil, map[int64]int{owner: 200, editor: 200, viewer: 200, stranger: 403}},
 		{"rename", "PATCH", path, map[string]string{"title": "x"}, map[int64]int{owner: 200, editor: 200, viewer: 403, stranger: 403}},
 		{"share", "PUT", fmt.Sprintf("%s/members/%d", path, 910005), map[string]string{"role": "viewer"}, map[int64]int{owner: 200, editor: 403, viewer: 403, stranger: 403}},
 		{"unshare", "DELETE", fmt.Sprintf("%s/members/%d", path, 910005), nil, map[int64]int{editor: 403, viewer: 403, stranger: 403, owner: 204}},
@@ -196,6 +203,64 @@ func TestPermissionMatrix(t *testing.T) {
 	}
 	if s, _, _ := c.do("GET", path, owner, "user", nil); s != http.StatusForbidden {
 		t.Errorf("read after delete: %d, want 403", s)
+	}
+}
+
+// The catch-up read: ops after `from`, ascending, as the log holds them.
+func TestListOps(t *testing.T) {
+	c := newTestServer(t)
+
+	status, doc, _ := c.do("POST", "/documents", owner, "user", map[string]string{"title": "Ops"})
+	if status != http.StatusCreated {
+		t.Fatalf("create: status %d", status)
+	}
+	docID := int64(doc["id"].(float64))
+	path := fmt.Sprintf("/documents/%d", docID)
+	t.Cleanup(func() { c.do("DELETE", path, owner, "user", nil) })
+
+	// Empty log: an empty array, never null.
+	s, _, list := c.do("GET", path+"/ops", owner, "user", nil)
+	if s != http.StatusOK || list == nil || len(list) != 0 {
+		t.Fatalf("empty log: %d %v, want 200 []", s, list)
+	}
+
+	for v, op := range []string{`["a"]`, `[1,"b"]`, `[2,"c"]`} {
+		if err := c.ops.Insert(docID, int64(v+1), owner, []byte(op)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, _, list = c.do("GET", path+"/ops?from=1", viewer, "user", nil)
+	if s != http.StatusForbidden {
+		t.Errorf("ops by non-member: %d, want 403", s)
+	}
+	s, _, list = c.do("GET", path+"/ops?from=1", owner, "user", nil)
+	if s != http.StatusOK || len(list) != 2 {
+		t.Fatalf("from=1: %d %v, want 2 ops", s, list)
+	}
+	if list[0]["version"] != float64(2) || list[1]["version"] != float64(3) || list[0]["user_id"] != float64(owner) {
+		t.Errorf("from=1 rows: %v, want versions 2 then 3", list)
+	}
+	if got, _ := json.Marshal(list[1]["op"]); string(got) != `[2,"c"]` {
+		t.Errorf("op body relayed as %s, want [2,\"c\"]", got)
+	}
+	if _, _, all := c.do("GET", path+"/ops", owner, "user", nil); len(all) != 3 {
+		t.Errorf("default from=0: %d ops, want 3", len(all))
+	}
+
+	// Bad `from`: a single 400 object, nothing appended after it.
+	for _, q := range []string{"?from=abc", "?from=-1", "?from=1.5"} {
+		s, bad, _ := c.do("GET", path+"/ops"+q, owner, "user", nil)
+		if s != http.StatusBadRequest || bad["error"] == "" {
+			t.Errorf("%s: %d %v, want 400 with an error object", q, s, bad)
+		}
+	}
+	// Deleting the document takes its log with it.
+	if s, _, _ := c.do("DELETE", path, owner, "user", nil); s != http.StatusNoContent {
+		t.Fatalf("delete: %d", s)
+	}
+	if s, _, _ := c.do("GET", path+"/ops", owner, "user", nil); s != http.StatusForbidden {
+		t.Errorf("ops after delete: %d, want 403", s)
 	}
 }
 

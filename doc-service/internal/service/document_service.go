@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"collab-docs-platform/doc-service/internal/domain"
+	"collab-docs-platform/doc-service/internal/session"
 )
 
 type DocumentRepositoryInterface interface {
@@ -17,6 +18,17 @@ type DocumentRepositoryInterface interface {
 	CountAll() (int64, error)
 	UpdateTitle(id int64, title string) error
 	Delete(id int64) error
+}
+
+type OpRepositoryInterface interface {
+	ListAfter(docID, from int64, limit int) ([]domain.Op, error)
+}
+
+// LiveDocuments is the session manager as the read path sees it: the
+// document a live session holds is ahead of the stored snapshot, so a read
+// that found one answers from it and is never behind the sockets.
+type LiveDocuments interface {
+	View(docID int64) (session.View, bool)
 }
 
 type MemberRepositoryInterface interface {
@@ -33,15 +45,20 @@ const (
 	// int64 overflow, which MySQL would reject as a negative OFFSET.
 	MaxPage        = 1_000_000
 	MaxTitleLength = 255
+	// MaxOpsPerPage bounds one catch-up read; a client further behind than
+	// this reads again from the last version it received.
+	MaxOpsPerPage = 500
 )
 
 type DocumentService struct {
 	docs    DocumentRepositoryInterface
 	members MemberRepositoryInterface
+	ops     OpRepositoryInterface
+	live    LiveDocuments
 }
 
-func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface) *DocumentService {
-	return &DocumentService{docs: docs, members: members}
+func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface, ops OpRepositoryInterface, live LiveDocuments) *DocumentService {
+	return &DocumentService{docs: docs, members: members, ops: ops, live: live}
 }
 
 // DocumentView is GET /documents/:id: the document, the caller's role and
@@ -131,7 +148,27 @@ func (s *DocumentService) Get(docID, userID int64) (*DocumentView, error) {
 		return nil, err
 	}
 
+	// A session open on this instance holds ops the snapshot does not have
+	// yet; its view is the truth the sockets see.
+	if live, ok := s.live.View(docID); ok {
+		doc.Title, doc.Content, doc.Version = live.Title, live.Content, live.Version
+	}
+
 	return &DocumentView{Document: *doc, Role: role, Members: members}, nil
+}
+
+// Membership is the WebSocket upgrade's permission check: the caller's role
+// (ErrForbidden for a non-member) and the member list for the snapshot frame.
+func (s *DocumentService) Membership(docID, userID int64) (string, []domain.Member, error) {
+	role, err := s.roleOf(docID, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	members, err := s.members.List(docID)
+	if err != nil {
+		return "", nil, err
+	}
+	return role, members, nil
 }
 
 func (s *DocumentService) Rename(docID, userID int64, title string) (*domain.DocumentSummary, error) {
@@ -177,6 +214,18 @@ func (s *DocumentService) Delete(docID, userID int64) error {
 		return ErrForbidden
 	}
 	return s.docs.Delete(docID)
+}
+
+// ListOps is the catch-up read: every member (viewers included) may read the
+// op log after version `from`, oldest first, at most MaxOpsPerPage rows.
+func (s *DocumentService) ListOps(docID, userID, from int64) ([]domain.Op, error) {
+	if _, err := s.roleOf(docID, userID); err != nil {
+		return nil, err
+	}
+	if from < 0 {
+		return nil, invalid("from must be at least 0")
+	}
+	return s.ops.ListAfter(docID, from, MaxOpsPerPage)
 }
 
 type DocumentPage struct {

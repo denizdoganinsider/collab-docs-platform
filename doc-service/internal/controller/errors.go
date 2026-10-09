@@ -53,6 +53,14 @@ func queryInt(c echo.Context, name string, fallback int) (int, error) {
 	return strconv.Atoi(raw)
 }
 
+func queryInt64(c echo.Context, name string, fallback int64) (int64, error) {
+	raw := c.QueryParam(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	return strconv.ParseInt(raw, 10, 64)
+}
+
 // paging parses ?page= and ?per_page=. It does NOT write the response: a
 // helper that both writes and returns nil (c.JSON's success value) lets the
 // handler keep going after the 400 is already on the wire. The caller maps

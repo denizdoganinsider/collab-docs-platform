@@ -115,6 +115,17 @@ func (r *DocumentRepository) UpdateTitle(id int64, title string) error {
 	return err
 }
 
+// Snapshot stores the folded content at version. The version guard makes it
+// monotonic: a late snapshot from a session that is being replaced cannot
+// move the document backwards. The op log is not touched; it is history.
+func (r *DocumentRepository) Snapshot(id int64, content string, version int64) error {
+	_, err := r.db.Exec(
+		`UPDATE documents SET content = ?, version = ? WHERE id = ? AND version < ?`,
+		content, version, id, version,
+	)
+	return err
+}
+
 // Delete removes the document, its op log and its members in one
 // transaction. There are no foreign keys to cascade for us (see schema).
 func (r *DocumentRepository) Delete(id int64) error {
