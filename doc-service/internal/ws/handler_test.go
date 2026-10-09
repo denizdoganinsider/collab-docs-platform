@@ -515,11 +515,13 @@ func TestShutdownCloses1001(t *testing.T) {
 	if h.store.doc.Content != "kept" {
 		t.Fatalf("shutdown snapshot = %q", h.store.doc.Content)
 	}
-	if _, status := h.dial(ownerID, origin, "7"); status != http.StatusSwitchingProtocols {
+	late, status := h.dial(ownerID, origin, "7")
+	if status != http.StatusSwitchingProtocols {
 		// The upgrade succeeds (the listener is still up) and the join is
 		// refused with a close frame.
 		t.Fatalf("post-shutdown dial status = %d", status)
 	}
+	expectClose(t, late, websocket.CloseGoingAway)
 }
 
 func TestClientLeaveIsNoticed(t *testing.T) {
