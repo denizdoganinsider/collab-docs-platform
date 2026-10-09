@@ -2,6 +2,7 @@ package ot
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -22,6 +23,20 @@ func TestApplyBaseLengthMismatch(t *testing.T) {
 	} {
 		if _, err := Apply("hello", op); !errors.Is(err, ErrBaseLength) {
 			t.Errorf("%s: err = %v, want ErrBaseLength", op, err)
+		}
+	}
+}
+
+// Apply must not trust the length sums alone: an op whose components wrap
+// them passes the up-front check and would otherwise index past the input.
+func TestApplyRefusesWrappedLengths(t *testing.T) {
+	for _, op := range []Operation{
+		{Retain(1 << 62), Insert("a"), Retain(1 << 62), Insert("b"), Retain(1 << 62), Insert("c"), Retain(1 << 62)},
+		{Retain(math.MaxInt64), Delete(math.MaxInt64), Retain(2)},
+		{Delete(math.MaxInt64), Retain(math.MinInt64 + 1), Retain(1)},
+	} {
+		if _, err := Apply("ab", op); !errors.Is(err, ErrBaseLength) {
+			t.Errorf("Apply(%s) = %v, want ErrBaseLength", op, err)
 		}
 	}
 }

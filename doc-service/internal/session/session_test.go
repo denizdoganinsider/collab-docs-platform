@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"math/rand"
 	"sync"
 	"testing"
@@ -420,6 +421,9 @@ func TestProtocolViolationsClose4400(t *testing.T) {
 		code string // error frame sent before the close, if any
 	}{
 		{"version ahead of the server", opIn(5, 1, ot.Retain(3)), "bad_version"},
+		{"negative version", opIn(-1, 1, ot.Retain(3)), "bad_version"},
+		{"min int64 version", opIn(math.MinInt64, 1, ot.Retain(3)), "bad_version"},
+		{"component over the limit", opIn(0, 1, ot.Retain(3), ot.Delete(1<<40)), ""},
 		{"wrong base length", opIn(0, 1, ot.Retain(2), ot.Insert("x")), ""},
 		{"not canonical", opIn(0, 1, ot.Retain(1), ot.Retain(2)), ""},
 		{"result over the size limit", opIn(0, 1, ot.Retain(3), ot.Insert(string(make([]rune, 62)))), ""},
@@ -995,5 +999,23 @@ func TestMemoryEqualsFoldedLog(t *testing.T) {
 		if snap.version > version {
 			t.Fatalf("snapshot at %d is ahead of the log (%d)", snap.version, version)
 		}
+	}
+}
+
+func TestRingAfterRefusesVersionsOutsideTheLog(t *testing.T) {
+	r := newRing(4)
+	for v := int64(1); v <= 5; v++ {
+		r.push(ringEntry{version: v})
+	}
+	for _, v := range []int64{math.MinInt64, -1, 6} {
+		if got, ok := r.after(v, 5); ok || got != nil {
+			t.Errorf("after(%d, 5) = %v, %v; want nil, false", v, got, ok)
+		}
+	}
+	if got, ok := r.after(0, 5); ok || got != nil {
+		t.Errorf("after(0, 5) = %v, %v; want nil, false (older than the ring)", got, ok)
+	}
+	if got, ok := r.after(2, 5); !ok || len(got) != 3 || got[0].version != 3 {
+		t.Errorf("after(2, 5) = %v, %v; want versions 3..5", got, ok)
 	}
 }

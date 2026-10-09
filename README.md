@@ -1130,6 +1130,37 @@ restarted both tabs went `connecting` → `live` and stayed equal.
 Exit criteria — all met: two tabs typing converge every time; the fuzzers run
 10 000 iterations clean; `kill -9` loses no acked op (e2e and by hand).
 
+Review findings addressed (pre-push panel on the month commit, follow-up
+commit `Address review findings: …`):
+
+- **Length sums can wrap.** `BaseLen`/`TargetLen` add plain ints, so a wire op
+  such as `[2^62,"a",2^62,"b",2^62,"c",2^62]` summed to a base length of 0 and
+  passed every check before `Apply` indexed past the document and panicked the
+  session goroutine — which has no `recover`, so the process died. `Validate`
+  now bounds every component (`MaxComponentLen` = 2^30, or the document limit
+  when smaller; `MinInt64` refused outright), `Apply` re-checks each retain and
+  delete against what is left of the input, and the replay in `load()` runs
+  `Validate` too. Tests carry the 2^62 and `MaxInt64` ops.
+- **A negative base version reached the ring.** `in.V` was bounded only from
+  above; `MinInt64` made `current - v` wrap and `make` panic. The session
+  answers `bad_version` + `4400` for `v < 0`, and `ring.after` refuses any
+  version outside `[0, current]` on its own.
+- **The editor sent cursors in text the server had not seen.** While edits were
+  buffered (state `AwaitingWithBuffer`) the caret could sit past the server's
+  length, which answers `bad_frame`. Cursor frames now wait for the ack that
+  flushes the buffer.
+- Smaller: the write pump drains queued frames before the close frame (the
+  `error` before a `4400` was lost about half the time to `select`'s random
+  pick); the read deadline is reset after a blocking `Deliver`; the join-failure
+  close uses `WriteControl` with a deadline; `onFrame` is wrapped so a throw
+  reconnects instead of desyncing; the textarea is read-only until the
+  snapshot frame arrives; a misplaced doc comment moved back onto `Delete`.
+- Not changed, with the reason: `closeDoc()` before the `DELETE` request is
+  deliberate (it avoids racing the `4004` close); an empty `WS_ALLOWED_ORIGINS`
+  meaning the default is the same rule as every other list variable; the
+  orphan-op window on delete and the stale-role window during an in-flight
+  upgrade are listed under trade-offs.
+
 ### Month 3 — December 2026 — Load Balancer *(planned)*
 
 Goal: N doc-service instances behind the gateway, with the sticky-routing
@@ -1569,6 +1600,11 @@ To be revised each month. Starting list, decided up front, plus what month 1 add
 - *m2* **Remote cursors are a list, not an overlay.** `user 2 at line 4, col 7`
   is exact and transformed through every op; drawing a coloured bar inside a
   `<textarea>` is a rendering exercise, not a lesson.
+- *m2* **A removal during an in-flight upgrade can seat a stale role.** The
+  membership check runs before the upgrade; a `DELETE members` that lands
+  between that check and the session's `join` is not seen by the join, and the
+  socket keeps the old role until the next membership event. The window is one
+  database round trip wide.
 - *m2* **A role downgrade is learned on the next edit.** The session keeps the
   socket and refuses the op with `error{forbidden}`; the editor then reloads
   from the server. A `role` frame would be cleaner; the spec did not define one

@@ -3,6 +3,7 @@ package ot
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -61,6 +62,14 @@ func TestValidate(t *testing.T) {
 		{"within limit", Operation{Retain(3), Insert("ab")}, 5, true},
 		{"over limit", Operation{Retain(3), Insert("abc")}, 5, false},
 		{"over limit counts code points", Operation{Insert("😀😀😀")}, 3, true},
+		{"component over the document limit", Operation{Retain(6)}, 5, false},
+		{"component over the hard bound", Operation{Retain(MaxComponentLen + 1)}, 0, false},
+		{"delete over the hard bound", Operation{Delete(MaxComponentLen + 1)}, 0, false},
+		{"min int64 delete", Operation{{N: math.MinInt64}}, 0, false},
+		// Sums that wrap past the length checks: four retains of 2^62 add up
+		// to 0, and MaxInt64 + (-MaxInt64) + 2 looks like a two-point op.
+		{"retains wrapping to zero", Operation{Retain(1 << 62), Insert("a"), Retain(1 << 62), Insert("b"), Retain(1 << 62), Insert("c"), Retain(1 << 62)}, 1 << 20, false},
+		{"lengths wrapping negative", Operation{Retain(math.MaxInt64), Delete(math.MaxInt64), Retain(2)}, 1 << 20, false},
 	}
 	for _, tc := range cases {
 		err := Validate(tc.op, tc.max)

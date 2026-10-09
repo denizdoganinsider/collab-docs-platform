@@ -37,12 +37,15 @@ func (r *ring) at(i int) ringEntry {
 // after returns the entries with version > v, oldest first, and false when
 // the ring no longer holds all of them. current is the document version.
 func (r *ring) after(v, current int64) ([]ringEntry, bool) {
-	need := int(current - v)
-	if need > r.n {
+	if v < 0 || v > current {
+		return nil, false
+	}
+	need := current - v
+	if need > int64(r.n) {
 		return nil, false
 	}
 	out := make([]ringEntry, 0, need)
-	for i := r.n - need; i < r.n; i++ {
+	for i := r.n - int(need); i < r.n; i++ {
 		out = append(out, r.at(i))
 	}
 	return out, true

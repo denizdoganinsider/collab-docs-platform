@@ -410,6 +410,36 @@ func TestBadOpShapeCloses4400(t *testing.T) {
 	}
 }
 
+// Crafted frames that once panicked the session goroutine: a base version
+// below zero and components whose length sums wrap. Each is a 4400, and the
+// server is still there for the next connection.
+func TestCraftedOpsAreRefusedNotFatal(t *testing.T) {
+	h := newHarness(t)
+	for _, tc := range []struct {
+		frame string
+		code  string // error frame before the close, if any
+	}{
+		{`{"type":"op","v":-9223372036854775808,"op":["x"],"seq":1}`, "bad_version"},
+		{`{"type":"op","v":0,"op":[4611686018427387904,"a",4611686018427387904,"b",4611686018427387904,"c",4611686018427387904],"seq":1}`, ""},
+		{`{"type":"op","v":0,"op":[9223372036854775807,-9223372036854775807,2],"seq":1}`, ""},
+	} {
+		c, _ := h.connect(ownerID)
+		send(t, c, tc.frame)
+		if tc.code != "" {
+			if f := expect(t, c, session.TypeError); f.Code != tc.code {
+				t.Fatalf("error = %+v", f)
+			}
+		}
+		expectClose(t, c, session.CloseProtocol)
+	}
+	c, snap := h.connect(ownerID)
+	if snap.V != 0 || snap.Content != "" {
+		t.Fatalf("snapshot after the crafted ops = %+v", snap)
+	}
+	send(t, c, `{"type":"op","v":0,"op":["ok"],"seq":1}`)
+	expect(t, c, session.TypeAck)
+}
+
 func TestSecondOpBeforeAckCloses4400(t *testing.T) {
 	gate := make(chan struct{})
 	h := newHarnessWith(t, gate)

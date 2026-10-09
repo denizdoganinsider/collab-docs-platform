@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -87,18 +88,33 @@ func TargetLen(op Operation) int {
 	return n
 }
 
+// MaxComponentLen bounds a single retain, delete or insert. The length sums
+// (BaseLen, TargetLen) are plain ints: a wire op with components near
+// MaxInt64 would wrap them past the document-length checks and reach a
+// slice index. Bounded per component, the sums of any op that fits in a
+// frame cannot overflow.
+const MaxComponentLen = 1 << 30
+
 // Validate checks the canonical-form invariants on an operation that arrived
-// from the wire: no zero components, no two adjacent components of the same
+// from the wire: no zero components, no component longer than MaxComponentLen
+// (or than maxTargetLen, when set), no two adjacent components of the same
 // kind, no delete directly followed by an insert, and a result no longer than
-// maxTargetLen code points (0 disables the bound). JSON type errors are
+// maxTargetLen code points (0 disables that bound). JSON type errors are
 // caught earlier, by UnmarshalJSON.
 func Validate(op Operation, maxTargetLen int) error {
+	limit := MaxComponentLen
+	if maxTargetLen > 0 && maxTargetLen < limit {
+		limit = maxTargetLen
+	}
 	for i, c := range op {
 		if c.isZero() {
 			return invalid("component %d is empty", i)
 		}
 		if c.N != 0 && c.S != "" {
 			return invalid("component %d is both a count and a string", i)
+		}
+		if c.N == math.MinInt64 || c.Len() > limit {
+			return invalid("component %d is longer than %d code points", i, limit)
 		}
 		if i == 0 {
 			continue

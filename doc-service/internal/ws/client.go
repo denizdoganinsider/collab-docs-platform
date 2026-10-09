@@ -114,6 +114,9 @@ func (c *Client) readPump() {
 		if !c.session.Deliver(c, in) {
 			return
 		}
+		// Deliver may have blocked under backpressure for longer than a
+		// pong interval; a deadline set before it would now be stale.
+		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	}
 }
 
@@ -140,6 +143,19 @@ func (c *Client) writePump() {
 				return
 			}
 		case <-c.closing:
+			// Frames queued before the close (an error frame, a last ack)
+			// go out first; select picks a ready case at random otherwise.
+			for drained := false; !drained; {
+				select {
+				case frame := <-c.send:
+					_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+					if err := c.conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+						return
+					}
+				default:
+					drained = true
+				}
+			}
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(c.code, c.reason))
 			return

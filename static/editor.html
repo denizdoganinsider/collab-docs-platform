@@ -288,6 +288,7 @@
     live.version = f.v;
     if (live.state === 'await') { live.state = 'sync'; live.outstanding = null; }
     else if (live.state === 'buffer') { live.state = 'await'; live.outstanding = live.buffer; live.buffer = null; sendOp(live.outstanding); }
+    if (cursorPending) sendCursor();
     renderMeta(); renderSync();
   }
 
@@ -324,12 +325,16 @@
     sendCursor();
   });
 
-  // Cursor frames: ~20/s at most, only when something changed.
-  let cursorTimer = null, lastCursor = '';
+  // Cursor frames: ~20/s at most, only when something changed. While edits
+  // are buffered (not yet sent) the caret lives in text the server has not
+  // seen, so the frame waits for the ack that flushes the buffer.
+  let cursorTimer = null, lastCursor = '', cursorPending = false;
   function sendCursor() {
     if (!live.ws || cursorTimer) return;
     cursorTimer = setTimeout(() => {
       cursorTimer = null;
+      if (live.state === 'buffer') { cursorPending = true; return; }
+      cursorPending = false;
       const pos = toCP(ta.value, ta.selectionStart), sel = toCP(ta.value, ta.selectionEnd);
       const key = pos + ':' + sel;
       if (key === lastCursor) return;
@@ -352,13 +357,17 @@
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${scheme}://${location.host}/ws?doc=${docId}&ticket=${ticket}`);
     live.ws = ws;
+    ta.readOnly = true; // until the snapshot frame says what the role is
     ws.onmessage = (ev) => {
       let f; try { f = JSON.parse(ev.data); } catch { return; }
-      onFrame(f);
+      // A throw here would leave the client silently out of step with the
+      // server; a reconnect gets a fresh snapshot.
+      try { onFrame(f); } catch (e) { fail(e); reconnect('client state diverged'); }
     };
     ws.onclose = (ev) => {
       if (live.ws !== ws) return;
       live.ws = null;
+      ta.readOnly = true;
       if (live.closing) { conn('', 'offline'); return; }
       if (ev.code === 4003) { conn('off', 'access revoked'); status('your access to this document was revoked', true); closeDoc(); loadDocs().catch(fail); return; }
       if (ev.code === 4004) { conn('off', 'deleted'); status('this document was deleted', true); closeDoc(); loadDocs().catch(fail); return; }

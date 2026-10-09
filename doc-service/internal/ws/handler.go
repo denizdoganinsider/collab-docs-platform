@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"time"
 
 	"collab-docs-platform/doc-service/internal/domain"
 	"collab-docs-platform/doc-service/internal/middleware"
@@ -96,7 +97,7 @@ func (h *Handler) Serve(c echo.Context) error {
 		default:
 			slog.Error("websocket join", "service", "doc-service", "doc_id", docID, "error", err)
 		}
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(writeWait))
 		conn.Close()
 		return nil
 	}

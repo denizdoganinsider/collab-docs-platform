@@ -340,6 +340,9 @@ func (s *Session) load() error {
 			if err := json.Unmarshal(row.Op, &op); err != nil {
 				return fmt.Errorf("op %d of document %d: %w", row.Version, s.docID, err)
 			}
+			if err := ot.Validate(op, 0); err != nil {
+				return fmt.Errorf("op %d of document %d: %w", row.Version, s.docID, err)
+			}
 			content, err := ot.Apply(s.content, op)
 			if err != nil {
 				return fmt.Errorf("op %d of document %d: %w", row.Version, s.docID, err)
@@ -409,8 +412,8 @@ func (s *Session) handleOp(c Client, st *clientState, in Inbound) {
 		s.evict(c, CloseProtocol, "second op before ack")
 		return
 	}
-	if in.V > s.version {
-		s.sendError(c, "bad_version", "base version is ahead of the server")
+	if in.V < 0 || in.V > s.version {
+		s.sendError(c, "bad_version", "base version is outside the log")
 		s.evict(c, CloseProtocol, "bad_version")
 		return
 	}
