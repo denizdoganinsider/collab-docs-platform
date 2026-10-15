@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"collab-docs-platform/gateway/internal/middleware"
@@ -121,5 +122,32 @@ func TestTrustedProxyRejectsUnusableTarget(t *testing.T) {
 	}
 	if _, err := NewTrustedProxy("http://localhost:9001", "k"); err != nil {
 		t.Errorf("NewTrustedProxy(valid) = %v", err)
+	}
+}
+
+// A client-supplied X-Forwarded-For is discarded, not appended to: the origin
+// sees only the address the gateway actually received the request from.
+func TestTrustedProxyReplacesClientForwardedFor(t *testing.T) {
+	origin, seen := captureOrigin(t)
+
+	handler, err := NewTrustedProxy(origin.URL, "gateway-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := echo.New()
+	request := httptest.NewRequest(http.MethodGet, "/documents/1", nil)
+	request.RemoteAddr = "198.51.100.7:4321"
+	request.Header.Set("X-Forwarded-For", "203.0.113.9")
+	c := e.NewContext(request, httptest.NewRecorder())
+
+	_ = handler(c)
+
+	got := seen.Get("X-Forwarded-For")
+	if strings.Contains(got, "203.0.113.9") {
+		t.Errorf("X-Forwarded-For = %q carries the client-set 203.0.113.9", got)
+	}
+	if got != "198.51.100.7" {
+		t.Errorf("X-Forwarded-For = %q, want the RemoteAddr host 198.51.100.7", got)
 	}
 }
