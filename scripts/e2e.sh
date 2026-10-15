@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# End-to-end test for months 1 and 2: starts doc-service and the gateway
-# against the compose MySQL, registers fresh users, walks the README
+# End-to-end test for months 1 to 3: starts two doc-service instances and the
+# gateway against the compose MySQL, registers fresh users, walks the README
 # verification flows (HTTP and WebSocket, the latter through cmd/wsprobe) plus
-# the permission matrix, kills doc-service with -9 and checks nothing acked was
-# lost. Exits non-zero on any failed expectation. Requires: docker
+# the permission matrix, kills an instance with -9 and checks nothing acked
+# was lost, then proves the balancer's stickiness, fail-closed and drain
+# behaviour. Exits non-zero on any failed expectation. Requires: docker
 # (docs_mysql healthy), curl, jq, go, lsof.
 #
-#   ./scripts/e2e.sh            # default ports 9000 / 9001
-#   GW_PORT=9100 DOC_PORT=9101 ./scripts/e2e.sh
+#   ./scripts/e2e.sh            # default ports 9000 / 9001 / 9011
+#   GW_PORT=9100 DOC_PORT=9101 DOC_PORT2=9111 ./scripts/e2e.sh
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GW_PORT="${GW_PORT:-9000}"
 DOC_PORT="${DOC_PORT:-9001}"
+DOC_PORT2="${DOC_PORT2:-9011}"
 GW="http://localhost:$GW_PORT"
 DOC="http://localhost:$DOC_PORT"
+DOC2="http://localhost:$DOC_PORT2"
 KEY="e2e-gateway-key-$RANDOM"
 JSON='Content-Type: application/json'
 LOG_DIR="$(mktemp -d)"
@@ -38,10 +41,10 @@ req() {
 }
 
 cleanup() {
-  [ -n "${DOC_PID:-}" ] && kill "$DOC_PID" 2>/dev/null
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
-  # go run leaves the compiled child listening; kill by port as a backstop.
-  lsof -ti ":$GW_PORT" -ti ":$DOC_PORT" 2>/dev/null | xargs kill 2>/dev/null
+  # doc-service instances are started by port; go run leaves the compiled
+  # gateway child listening too, so kill by port.
+  lsof -ti ":$GW_PORT" -ti ":$DOC_PORT" -ti ":$DOC_PORT2" 2>/dev/null | xargs kill 2>/dev/null
   wait 2>/dev/null
   if [ "$FAIL" -ne 0 ]; then echo "logs kept in $LOG_DIR"; else rm -rf "$LOG_DIR"; fi
 }
@@ -53,8 +56,8 @@ for tool in docker curl jq go lsof; do command -v "$tool" >/dev/null || { echo "
 if [ "$(docker inspect -f '{{.State.Health.Status}}' docs_mysql 2>/dev/null)" != "healthy" ]; then
   echo "docs_mysql is not healthy; run: docker compose up -d"; exit 2
 fi
-if lsof -ti ":$GW_PORT" -ti ":$DOC_PORT" >/dev/null 2>&1; then
-  echo "port $GW_PORT or $DOC_PORT already in use"; exit 2
+if lsof -ti ":$GW_PORT" -ti ":$DOC_PORT" -ti ":$DOC_PORT2" >/dev/null 2>&1; then
+  echo "port $GW_PORT, $DOC_PORT or $DOC_PORT2 already in use"; exit 2
 fi
 ok "mysql healthy, ports free"
 
@@ -63,20 +66,26 @@ say "starting services"
 # Compiled once: `go run` per probe would add seconds to every check.
 ( cd "$ROOT/doc-service" && go build -o "$LOG_DIR/wsprobe" ./cmd/wsprobe && go build -o "$LOG_DIR/doc" ./cmd/doc ) || { echo "build failed"; exit 2; }
 PROBE="$LOG_DIR/wsprobe"
+# start_doc PORT: one doc-service instance, logging to doc-PORT.log. The
+# drain is shortened from the default 5 s so the shutdown test stays quick;
+# it still exceeds the gateway's 1 s poll interval below, as it must.
 start_doc() {
-  ( GATEWAY_SHARED_KEY="$KEY" SERVER_PORT="$DOC_PORT" WS_ALLOWED_ORIGINS="http://localhost:$GW_PORT" exec "$LOG_DIR/doc" ) >>"$LOG_DIR/doc.log" 2>&1 &
-  DOC_PID=$!; disown
+  ( GATEWAY_SHARED_KEY="$KEY" SERVER_PORT="$1" SHUTDOWN_DRAIN_SECONDS=2 WS_ALLOWED_ORIGINS="http://localhost:$GW_PORT" exec "$LOG_DIR/doc" ) >>"$LOG_DIR/doc-$1.log" 2>&1 &
+  disown
 }
-start_doc
+start_doc "$DOC_PORT"
+start_doc "$DOC_PORT2"
 ( cd "$ROOT/gateway" && JWT_SECRET="e2e-jwt-secret" GATEWAY_SHARED_KEY="$KEY" SERVER_PORT="$GW_PORT" \
-    DOC_SERVICE_URLS="$DOC" exec go run ./cmd/gateway ) >"$LOG_DIR/gateway.log" 2>&1 &
+    DOC_SERVICE_URLS="$DOC,$DOC2" LB_HEALTH_INTERVAL_SECONDS=1 exec go run ./cmd/gateway ) >"$LOG_DIR/gateway.log" 2>&1 &
 GW_PID=$!; disown
 for _ in $(seq 1 60); do
-  curl -sf "$GW/health" >/dev/null && curl -sf "$DOC/health" >/dev/null && break
+  curl -sf "$GW/health" >/dev/null && curl -sf "$DOC/health" >/dev/null && curl -sf "$DOC2/health" >/dev/null && break
   sleep 1
 done
 expect "gateway /health" '{"status":"ok"}' "$(curl -s "$GW/health")"
 expect "doc-service /health" "{\"instance\":\"doc-$DOC_PORT\",\"status\":\"ok\"}" "$(curl -s "$DOC/health")"
+expect "second doc-service /health" "{\"instance\":\"doc-$DOC_PORT2\",\"status\":\"ok\"}" "$(curl -s "$DOC2/health")"
+expect "every doc-service response names its instance" "doc-$DOC_PORT" "$(curl -s -o /dev/null -D - "$DOC/nope" | awk 'tolower($1)=="x-doc-instance:" {print $2}' | tr -d '\r')"
 
 # ---- static + routing ------------------------------------------------------
 say "static page and routing"
@@ -230,6 +239,9 @@ expect "no rows left for the document" "0	0" "$(docker exec -i docs_mysql mysql 
 say "websocket (README month 2 block)"
 WS="ws://localhost:$GW_PORT/ws"
 ticket() { req POST /ws-ticket "$1"; echo "$BODY" | jq -r .ticket; }
+instance_of() { # PATH TOKEN -> the X-Doc-Instance the gateway relayed
+  curl -s -o /dev/null -D - "$GW$1" -H "Authorization: Bearer $2" | awk 'tolower($1)=="x-doc-instance:" {print $2}' | tr -d '\r'
+}
 frame() { echo "$1" | grep '^{' | jq -c "select(.type==\"$2\")" | head -n1; }   # first frame of a type in a probe's output
 
 req POST /documents "$TOKEN_A" '{"title":"Live"}'
@@ -266,7 +278,7 @@ expect "last socket gone: the snapshot is written (v1)" "1" "$(docker exec -i do
   "SELECT version FROM docs_service_db.documents WHERE id=$LIVE" 2>/dev/null)"
 expect "no ticket -> 401" "http 401" "$("$PROBE" "$WS?doc=$LIVE")"
 expect "ticket never appears in the gateway log" "0" "$(grep -c "$T_A" "$LOG_DIR/gateway.log")"
-expect "ticket never appears in the doc-service log" "0" "$(grep -c "$T_A" "$LOG_DIR/doc.log")"
+expect "ticket never appears in the doc-service log" "0" "$(cat "$LOG_DIR"/doc-*.log | grep -c "$T_A")"
 expect "stranger with a valid ticket -> 403 before the upgrade" "http 403" "$("$PROBE" "$WS?doc=$LIVE&ticket=$(ticket "$TOKEN_C")")"
 expect "foreign Origin -> 403" "http 403" "$("$PROBE" --origin http://evil.test "$WS?doc=$LIVE&ticket=$(ticket "$TOKEN_A")")"
 OUT=$("$PROBE" --origin "http://localhost:$GW_PORT" "$WS?doc=$LIVE&ticket=$(ticket "$TOKEN_A")")
@@ -321,23 +333,110 @@ req POST /documents "$TOKEN_A" '{"title":"Crash"}'
 CRASH=$(echo "$BODY" | jq -r .id)
 OUT=$("$PROBE" "$WS?doc=$CRASH&ticket=$(ticket "$TOKEN_A")" '{"type":"op","v":0,"op":["survives"],"seq":1}')
 expect "op acked before the crash" "1" "$(frame "$OUT" ack | jq -r .v)"
-kill -9 "$(lsof -ti "TCP:$DOC_PORT" -sTCP:LISTEN)" 2>/dev/null; sleep 0.5   # the listener only: -i :port also matches the gateway's proxy connections
-start_doc
-for _ in $(seq 1 30); do curl -sf "$DOC/health" >/dev/null && break; sleep 0.5; done
+CRASH_PORT=$(instance_of "/documents/$CRASH" "$TOKEN_A"); CRASH_PORT=${CRASH_PORT#doc-}
+kill -9 "$(lsof -ti "TCP:$CRASH_PORT" -sTCP:LISTEN)" 2>/dev/null; sleep 0.5   # the listener only: -i :port also matches the gateway's proxy connections
+start_doc "$CRASH_PORT"
+for _ in $(seq 1 30); do curl -sf "http://localhost:$CRASH_PORT/health" >/dev/null && break; sleep 0.5; done
+sleep 1.5   # the balancer's next sweep (1 s) puts the instance back
 OUT=$("$PROBE" "$WS?doc=$CRASH&ticket=$(ticket "$TOKEN_A")")
 expect "after kill -9 and restart the snapshot is v1 with the text" "1 survives" "$(frame "$OUT" snapshot | jq -r '"\(.v) \(.content)"')"
 req DELETE "/documents/$CRASH" "$TOKEN_A"
+
+# ---- load balancer (README month 3 block) -----------------------------------
+say "load balancer (README month 3 block)"
+# Every route about one document lands on one instance: three sockets, then
+# the HTTP read. Documents are created until both instances hold one (the
+# hash spreads them; twelve tries without both would be a one-in-two-thousand
+# event, so a miss here is a bug).
+ON_1=""; ON_2=""; LB_DOCS=""
+for i in $(seq 1 12); do
+  req POST /documents "$TOKEN_A" "{\"title\":\"LB $i\"}"; D=$(echo "$BODY" | jq -r .id); LB_DOCS="$LB_DOCS $D"
+  SEEN=""
+  for _ in 1 2 3; do SEEN="$SEEN $("$PROBE" "$WS?doc=$D&ticket=$(ticket "$TOKEN_A")" | awk '$1=="instance" {print $2}')"; done
+  HTTP=$(instance_of "/documents/$D" "$TOKEN_A")
+  expect "doc $D: three sockets and the HTTP read on one instance ($HTTP)" " $HTTP $HTTP $HTTP" "$SEEN"
+  case "$HTTP" in "doc-$DOC_PORT") ON_1=$D;; "doc-$DOC_PORT2") ON_2=$D;; esac
+  [ -n "$ON_1" ] && [ -n "$ON_2" ] && break
+done
+expect "documents spread over both instances" "both" "$([ -n "$ON_1" ] && [ -n "$ON_2" ] && echo both || echo "on $DOC_PORT: '$ON_1', on $DOC_PORT2: '$ON_2'")"
+expect "members route like the document" "$(instance_of "/documents/$ON_2" "$TOKEN_A")" "$(instance_of "/documents/$ON_2/members" "$TOKEN_A")"
+expect "ops route like the document" "$(instance_of "/documents/$ON_1" "$TOKEN_A")" "$(instance_of "/documents/$ON_1/ops" "$TOKEN_A")"
+
+RR=""; for _ in 1 2 3 4; do RR="$RR $(instance_of /documents "$TOKEN_A")"; done
+read -r R1 R2 R3 R4 <<<"$RR"
+expect "GET /documents alternates between the instances" "alternating" "$([ "$R1" != "$R2" ] && [ "$R1" = "$R3" ] && [ "$R2" = "$R4" ] && echo alternating || echo "$RR")"
+
+# A membership removal reaches the live session on the right instance: B's
+# socket is closed by the process that handled the HTTP call, on both.
+for D in "$ON_1" "$ON_2"; do
+  req PUT "/documents/$D/members/$ID_B" "$TOKEN_A" '{"role":"viewer"}'
+  B_OUT="$LOG_DIR/b-$D.frames"
+  "$PROBE" --wait 5s "$WS?doc=$D&ticket=$(ticket "$TOKEN_B")" >"$B_OUT" &
+  B_PROBE=$!; sleep 1
+  req DELETE "/documents/$D/members/$ID_B" "$TOKEN_A"
+  sleep 1
+  STILL=$(kill -0 "$B_PROBE" 2>/dev/null && echo "still open" || echo closed)
+  wait "$B_PROBE"
+  expect "doc $D on $(instance_of "/documents/$D" "$TOKEN_A"): unshare closes B's socket with 4003 within 1 s" "closed close 4003" "$STILL $(grep '^close' "$B_OUT" | cut -d' ' -f1,2)"
+done
+
+# Fail closed: the ring is never rebuilt, so a dead instance's documents
+# answer 503 until it is back, and come back on the same instance.
+req GET /health/backends "$TOKEN_ADMIN"
+expect "/health/backends lists both instances healthy" "200 localhost:$DOC_PORT=true localhost:$DOC_PORT2=true" \
+  "$STATUS $(echo "$BODY" | jq -r '.doc_service[] | "\(.backend)=\(.healthy)"' | tr '\n' ' ' | sed 's/ $//')"
+req GET /health/backends "$TOKEN_B"
+expect "/health/backends as user -> 403" "403" "$STATUS"
+kill -9 "$(lsof -ti "TCP:$DOC_PORT2" -sTCP:LISTEN)"; sleep 2.5   # one poll interval plus margin
+req GET /health/backends "$TOKEN_ADMIN"
+expect "killed instance is marked down" "false" "$(echo "$BODY" | jq -r ".doc_service[] | select(.backend==\"localhost:$DOC_PORT2\") | .healthy")"
+req GET "/documents/$ON_2" "$TOKEN_A"
+expect "document on the dead instance -> 503, not rerouted" "503 the instance serving this document is unavailable" "$STATUS $(echo "$BODY" | jq -r .error)"
+expect "socket to the dead instance -> 503 too" "http 503" "$("$PROBE" "$WS?doc=$ON_2&ticket=$(ticket "$TOKEN_A")")"
+req GET "/documents/$ON_1" "$TOKEN_A"
+expect "document on the live instance -> 200" "200" "$STATUS"
+OK=0; for _ in 1 2 3 4; do req GET /documents "$TOKEN_A"; [ "$STATUS" = 200 ] && OK=$((OK+1)); done
+expect "GET /documents -> 200 always" "4" "$OK"
+expect "GET /documents is served by the survivor only" "doc-$DOC_PORT" "$(for _ in 1 2 3; do instance_of /documents "$TOKEN_A"; done | sort -u | tr '\n' ' ' | sed 's/ $//')"
+start_doc "$DOC_PORT2"
+for _ in $(seq 1 30); do curl -sf "$DOC2/health" >/dev/null && break; sleep 0.5; done
+sleep 1.5
+req GET /health/backends "$TOKEN_ADMIN"
+expect "restarted instance is back" "true" "$(echo "$BODY" | jq -r ".doc_service[] | select(.backend==\"localhost:$DOC_PORT2\") | .healthy")"
+expect "its documents come back on the same instance" "doc-$DOC_PORT2" "$(instance_of "/documents/$ON_2" "$TOKEN_A")"
+
+# Graceful drain: SIGTERM turns /health 503 at once while the listener and
+# the sockets stay up for SHUTDOWN_DRAIN_SECONDS (2 s here), the balancer
+# stops routing within a poll, then the sockets close with 1001.
+"$PROBE" --wait 6s "$WS?doc=$ON_1&ticket=$(ticket "$TOKEN_A")" >"$A_OUT" &
+A_PROBE=$!; sleep 1
+kill -TERM "$(lsof -ti "TCP:$DOC_PORT" -sTCP:LISTEN)"
+expect "/health answers 503 draining right after SIGTERM" "503 draining" "$(curl -s -o /dev/null -w '%{http_code}' "$DOC/health") $(curl -s "$DOC/health" | jq -r .status)"
+sleep 1
+expect "the open socket is still open 1 s into the drain" "still open" "$(kill -0 "$A_PROBE" 2>/dev/null && echo "still open" || echo closed)"
+req GET /health/backends "$TOKEN_ADMIN"
+expect "balancer stopped routing to the draining instance within one poll" "false" "$(echo "$BODY" | jq -r ".doc_service[] | select(.backend==\"localhost:$DOC_PORT\") | .healthy")"
+wait "$A_PROBE"
+expect "after the drain the socket closed with 1001" "close 1001" "$(grep '^close' "$A_OUT" | cut -d' ' -f1,2)"
+for _ in $(seq 1 20); do lsof -ti "TCP:$DOC_PORT" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.5; done
+expect "the process exited after the drain" "gone" "$(lsof -ti "TCP:$DOC_PORT" -sTCP:LISTEN >/dev/null 2>&1 && echo listening || echo gone)"
+start_doc "$DOC_PORT"
+for _ in $(seq 1 30); do curl -sf "$DOC/health" >/dev/null && break; sleep 0.5; done
+sleep 1.5
+req GET /health/backends "$TOKEN_ADMIN"
+expect "both instances healthy again" "true true" "$(echo "$BODY" | jq -r '.doc_service[].healthy' | tr '\n' ' ' | sed 's/ $//')"
+for D in $LB_DOCS; do req DELETE "/documents/$D" "$TOKEN_A"; done
 
 # ---- observability ---------------------------------------------------------
 say "observability"
 RID="e2e-trace-$SUFFIX"
 curl -s -o /dev/null "$GW/documents" -H "Authorization: Bearer $TOKEN_A" -H "X-Request-ID: $RID"
-expect "request id reaches doc-service log" "1" "$(grep -c "$RID" "$LOG_DIR/doc.log")"
+expect "request id reaches the doc-service log" "1" "$(cat "$LOG_DIR"/doc-*.log | grep -c "$RID")"
 curl -s -o /dev/null "$GW/documents?page=1&leak=SECRET-$SUFFIX" -H "Authorization: Bearer $TOKEN_A"
 expect "query string never logged (gateway)" "0" "$(grep -c "SECRET-$SUFFIX" "$LOG_DIR/gateway.log")"
-expect "query string never logged (doc-service)" "0" "$(grep -c "SECRET-$SUFFIX" "$LOG_DIR/doc.log")"
-expect "Authorization never appears in a doc-service log line" "0" "$(grep -ci -E 'authorization|bearer' "$LOG_DIR/doc.log")"
-expect "no 5xx in either log" "0" "$(grep -c '"status":5' "$LOG_DIR/gateway.log" "$LOG_DIR/doc.log" | awk -F: '{s+=$2} END {print s}')"
+expect "query string never logged (doc-service)" "0" "$(cat "$LOG_DIR"/doc-*.log | grep -c "SECRET-$SUFFIX")"
+expect "Authorization never appears in a doc-service log line" "0" "$(cat "$LOG_DIR"/doc-*.log | grep -ci -E 'authorization|bearer')"
+expect "no 500 or 502 in any log (503 is the balancer failing closed)" "0" "$(cat "$LOG_DIR/gateway.log" "$LOG_DIR"/doc-*.log | grep -cE '"status":50[02]')"
 
 # ---- teardown --------------------------------------------------------------
 say "teardown"

@@ -12,6 +12,7 @@ import (
 
 	"collab-docs-platform/gateway/config"
 	"collab-docs-platform/gateway/internal/controller"
+	"collab-docs-platform/gateway/internal/loadbalancer"
 	"collab-docs-platform/gateway/internal/proxy"
 	"collab-docs-platform/gateway/internal/repository"
 	"collab-docs-platform/gateway/internal/service"
@@ -39,17 +40,25 @@ func main() {
 	defer tickets.Close()
 	ticketController := controller.NewTicketController(tickets)
 
-	// Month 1: a single doc-service instance behind a plain reverse proxy.
-	// Month 3 replaces this with a pool and per-route balancing strategies.
-	if len(cfg.DocServiceURLs) > 1 {
-		slog.Warn("DOC_SERVICE_URLS lists several instances; month 1 proxies to the first only",
-			"using", cfg.DocServiceURLs[0], "ignored", cfg.DocServiceURLs[1:])
-	}
-	docProxy, err := proxy.NewTrustedProxy(cfg.DocServiceURLs[0], cfg.GatewayKey)
+	// Every doc-service instance the gateway may route to. The pool is the
+	// load balancer's view of the world: fixed membership, live health. The
+	// first sweep runs before the listener opens, so no request is ever
+	// routed on the optimistic default.
+	docPool, err := loadbalancer.NewPool(cfg.DocServiceURLs)
 	if err != nil {
-		slog.Error("failed to build doc-service proxy", "error", err)
+		slog.Error("failed to build doc-service pool", "error", err)
 		os.Exit(1)
 	}
+	docPool.Start(time.Duration(cfg.LBHealthIntervalSeconds) * time.Second)
+	defer docPool.Close()
+
+	// Two strategies for two kinds of request. The user-scoped list and
+	// create are database operations any instance can serve, so they
+	// round-robin. Everything about one document - the socket, the live
+	// reads, the membership changes that evict a socket - must reach the
+	// one process whose memory holds the session, so it hashes on the id.
+	docAnyProxy := proxy.NewBalancedProxy(docPool, loadbalancer.NewRoundRobin(docPool), cfg.GatewayKey)
+	docStickyProxy := proxy.NewBalancedProxy(docPool, loadbalancer.NewConsistentHash(docPool, loadbalancer.DocumentKey), cfg.GatewayKey)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -90,21 +99,27 @@ func main() {
 	e.GET("/me", authController.Me, user...)
 	e.POST("/ws-ticket", ticketController.Issue, user...)
 	e.GET("/admin/users", adminController.ListUsers, admin...)
+	e.GET("/health/backends", controller.Backends(docPool), admin...)
 
 	// doc-service. Authentication happened above; authorization (per-document
 	// roles) is doc-service's job, because the gateway does not know what a
 	// document is. It receives X-User-ID / X-User-Role and decides.
-	e.Any("/documents", docProxy, user...)
-	e.Any("/documents/*", docProxy, user...)
-	e.GET("/admin/documents", docProxy, admin...)
+	//
+	// /documents/* is sticky, not just /ws: a membership removal handled on
+	// the wrong instance would leave the evicted user's socket open on the
+	// right one, and GET /documents/:id answers from the live session.
+	e.Any("/documents", docAnyProxy, user...)
+	e.Any("/documents/*", docStickyProxy, user...)
+	e.GET("/admin/documents", docAnyProxy, admin...)
 
 	// A browser cannot put a Bearer token on a WebSocket handshake, so /ws
 	// takes the one-shot ticket from POST /ws-ticket instead. The middleware
 	// establishes the identity the same way JWTMiddleware does, the proxy
 	// forwards it as headers on the upgrade request, and the ticket never
 	// travels past this process. httputil.ReverseProxy pipes the upgraded
-	// connection both ways.
-	e.GET("/ws", docProxy, gatewayMiddleware.WSTicketMiddleware(tickets))
+	// connection both ways. Routed by consistent hash on ?doc=, to the
+	// instance that also serves that document's HTTP routes.
+	e.GET("/ws", docStickyProxy, gatewayMiddleware.WSTicketMiddleware(tickets))
 
 	go func() {
 		slog.Info("gateway listening", "port", cfg.ServerPort)

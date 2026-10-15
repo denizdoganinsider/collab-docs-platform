@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -10,9 +12,14 @@ import (
 type Config struct {
 	ServerPort string
 
-	// Names this process in /health and (month 3) in X-Doc-Instance, so
-	// "which instance answered" is visible from outside.
+	// Names this process in /health and in X-Doc-Instance, so "which
+	// instance answered" is visible from outside.
 	InstanceID string
+
+	// How long /health answers 503 after SIGTERM before sockets close. Must
+	// be at least the gateway's LB_HEALTH_INTERVAL_SECONDS, or the balancer
+	// is still sending new connections when the listener goes away.
+	ShutdownDrainSeconds int
 
 	// Proves a request came through the gateway. doc-service never sees a
 	// user token; it trusts X-User-ID only when this key accompanies it.
@@ -35,9 +42,14 @@ type Config struct {
 
 func LoadConfig() *Config {
 	port := getEnv("SERVER_PORT", "9001")
+	instanceID := getEnv("INSTANCE_ID", "doc-"+port)
+	if err := ValidateInstanceID(instanceID); err != nil {
+		slog.Error("INSTANCE_ID is not usable", "value", instanceID, "error", err)
+		os.Exit(1)
+	}
 	return &Config{
 		ServerPort: port,
-		InstanceID: getEnv("INSTANCE_ID", "doc-"+port),
+		InstanceID: instanceID,
 		GatewayKey: requireEnv("GATEWAY_SHARED_KEY"),
 		DBDSN:      getEnv("DB_DSN", "root:root@tcp(localhost:3308)/docs_service_db?parseTime=true"),
 
@@ -47,9 +59,30 @@ func LoadConfig() *Config {
 		SnapshotEveryOps:     positiveInt("SNAPSHOT_EVERY_OPS", 100),
 		SnapshotEverySeconds: positiveInt("SNAPSHOT_EVERY_SECONDS", 30),
 		SessionIdleSeconds:   positiveInt("SESSION_IDLE_SECONDS", 60),
+		ShutdownDrainSeconds: positiveInt("SHUTDOWN_DRAIN_SECONDS", 5),
 
 		WSAllowedOrigins: getEnvList("WS_ALLOWED_ORIGINS", []string{"http://localhost:9000"}),
 	}
+}
+
+// ValidateInstanceID bounds the value to what a header and a log field can
+// carry verbatim: 1-64 characters from [A-Za-z0-9._-]. A space, a colon or
+// a CR/LF would otherwise reach X-Doc-Instance unchanged.
+func ValidateInstanceID(id string) error {
+	if id == "" {
+		return errors.New("must not be empty")
+	}
+	if len(id) > 64 {
+		return errors.New("must be at most 64 characters")
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf("character %q is not allowed (use letters, digits, '-', '_' or '.')", r)
+		}
+	}
+	return nil
 }
 
 // requireEnv has no fallback on purpose: a predictable gateway key would let

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"collab-docs-platform/doc-service/internal/middleware"
@@ -19,6 +20,10 @@ type Dependencies struct {
 	// WebSocket upgrade handler (package ws); a handler func so this package
 	// does not import ws, which imports it.
 	WebSocket echo.HandlerFunc
+	// Set by main on SIGTERM. While true /health answers 503 so the gateway
+	// stops routing new connections here before the listener closes. nil
+	// means the process never drains (tests).
+	Draining *atomic.Bool
 }
 
 // NewRouter wires every route. Only /health is reachable without the
@@ -33,9 +38,19 @@ func NewRouter(deps Dependencies) *echo.Echo {
 	e.Server.IdleTimeout = 120 * time.Second
 
 	e.Use(middleware.RequestIDMiddleware)
+	e.Use(middleware.InstanceHeader(deps.InstanceID))
 	e.Use(middleware.LoggerMiddleware)
 
+	// Liveness plus lifecycle, nothing else: no database ping. The gateway's
+	// balancer consumes this, and a probe that shares fate with the database
+	// would take every instance out of the pool at once during a database
+	// blip. The one state it must report is draining (SIGTERM received),
+	// which is what lets the balancer stop sending connections before they
+	// would be cut.
 	e.GET("/health", func(c echo.Context) error {
+		if deps.Draining != nil && deps.Draining.Load() {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "draining", "instance": deps.InstanceID})
+		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "instance": deps.InstanceID})
 	})
 
