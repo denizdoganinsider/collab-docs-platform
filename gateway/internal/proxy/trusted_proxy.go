@@ -21,13 +21,15 @@ const (
 	UserRoleHeader   = "X-User-Role"
 )
 
-// NewTrustedProxy is the edge-auth boundary. The gateway has already run
-// JWTMiddleware; this forwards the identity it established as X-User-ID and
-// X-User-Role, with X-Gateway-Key as proof the request passed through here.
-// All three headers are overwritten, never merged: whatever a client put in
-// them is discarded. The Authorization header stops here - no backend ever
-// sees the credential, so no backend can leak it or be tempted to validate
-// it with a second copy of jwt.go.
+// NewTrustedProxy is the edge-auth boundary in front of a single-instance
+// service (notification- and publish-service in months 5 and 6; doc-service
+// until month 3 replaced it with NewBalancedProxy). The gateway has already
+// run JWTMiddleware; this forwards the identity it established as X-User-ID
+// and X-User-Role, with X-Gateway-Key as proof the request passed through
+// here. All three headers are overwritten, never merged: whatever a client
+// put in them is discarded. The Authorization header stops here - no backend
+// ever sees the credential, so no backend can leak it or be tempted to
+// validate it with a second copy of jwt.go.
 //
 // httputil.ReverseProxy transparently proxies WebSocket upgrades as well
 // (month 2): it detects Connection: Upgrade, hijacks the TCP connection and
@@ -44,40 +46,10 @@ func NewTrustedProxy(targetURL string, gatewayKey string) (echo.HandlerFunc, err
 		return nil, fmt.Errorf("proxy target %q must be an http(s) URL with a host", targetURL)
 	}
 
-	rp := httputil.NewSingleHostReverseProxy(target)
-	// A backend that stops answering must not hold gateway goroutines
-	// forever. Headers only: the body timeout is left open for WebSocket
-	// streams (month 2).
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 30 * time.Second
-	rp.Transport = transport
-	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		slog.Error("proxy error", "service", "gateway", "target", targetURL, "path", r.URL.Path, "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "backend unavailable"})
-	}
+	rp := newReverseProxy(target)
 
 	return func(c echo.Context) error {
-		requestID, _ := c.Get(middleware.RequestIDKey).(string)
-		headers := c.Request().Header
-
-		if requestID != "" {
-			headers.Set(middleware.RequestIDHeader, requestID)
-		}
-
-		headers.Set(GatewayKeyHeader, gatewayKey)
-
-		headers.Del(UserIDHeader)
-		headers.Del(UserRoleHeader)
-		if userID, ok := c.Get(middleware.UserIDKey).(int64); ok {
-			headers.Set(UserIDHeader, strconv.FormatInt(userID, 10))
-			if role, ok := c.Get(middleware.RoleKey).(string); ok && role != "" {
-				headers.Set(UserRoleHeader, role)
-			}
-		}
-
-		headers.Del("Authorization")
+		requestID := forwardIdentity(c, gatewayKey)
 
 		slog.Info("proxying request",
 			"service", "gateway",
@@ -89,4 +61,56 @@ func NewTrustedProxy(targetURL string, gatewayKey string) (echo.HandlerFunc, err
 		rp.ServeHTTP(c.Response(), c.Request())
 		return nil
 	}, nil
+}
+
+// newReverseProxy is one upstream's proxy with the bounds and the error
+// shape every proxied route shares.
+func newReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	// SetURL also rewrites the outbound Host to the upstream's own: a
+	// host-routed backend would otherwise fall through to a default vhost.
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			r.SetXForwarded()
+		},
+	}
+	// A backend that stops answering must not hold gateway goroutines
+	// forever. Headers only: the body timeout is left open for WebSocket
+	// streams (month 2).
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	rp.Transport = transport
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		slog.Error("proxy error", "service", "gateway", "target", target.Host, "path", r.URL.Path, "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "backend unavailable"})
+	}
+	return rp
+}
+
+// forwardIdentity rewrites the outgoing headers to the trust contract
+// described on NewTrustedProxy and returns the request id for the log line.
+func forwardIdentity(c echo.Context, gatewayKey string) string {
+	requestID, _ := c.Get(middleware.RequestIDKey).(string)
+	headers := c.Request().Header
+
+	if requestID != "" {
+		headers.Set(middleware.RequestIDHeader, requestID)
+	}
+
+	headers.Set(GatewayKeyHeader, gatewayKey)
+
+	headers.Del(UserIDHeader)
+	headers.Del(UserRoleHeader)
+	if userID, ok := c.Get(middleware.UserIDKey).(int64); ok {
+		headers.Set(UserIDHeader, strconv.FormatInt(userID, 10))
+		if role, ok := c.Get(middleware.RoleKey).(string); ok && role != "" {
+			headers.Set(UserRoleHeader, role)
+		}
+	}
+
+	headers.Del("Authorization")
+
+	return requestID
 }

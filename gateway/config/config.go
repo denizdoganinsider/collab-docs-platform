@@ -3,6 +3,7 @@ package config
 import (
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,11 @@ type Config struct {
 	// the gateway load-balances across them.
 	DocServiceURLs []string
 
+	// How often the pool probes every doc-service /health. doc-service's
+	// SHUTDOWN_DRAIN_SECONDS must be at least this, or a draining instance
+	// closes its listener before the balancer has seen it turn 503.
+	LBHealthIntervalSeconds int
+
 	StaticDir string
 }
 
@@ -34,6 +40,8 @@ func LoadConfig() *Config {
 		DBDSN:          getEnv("DB_DSN", "root:root@tcp(localhost:3308)/docs_gateway_db?parseTime=true"),
 		DocServiceURLs: getEnvList("DOC_SERVICE_URLS", []string{"http://localhost:9001"}),
 		StaticDir:      getEnv("STATIC_DIR", "../static"),
+
+		LBHealthIntervalSeconds: positiveInt("LB_HEALTH_INTERVAL_SECONDS", 5),
 	}
 }
 
@@ -47,6 +55,21 @@ func requireEnv(key string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+// positiveInt fails at startup on a value that is set but unusable: an
+// interval of 0 would panic in time.NewTicker much later.
+func positiveInt(key string, fallback int) int {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		slog.Error("environment variable must be a positive integer", "name", key, "value", raw)
+		os.Exit(1)
+	}
+	return n
 }
 
 func getEnv(key, fallback string) string {

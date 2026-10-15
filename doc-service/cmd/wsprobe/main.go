@@ -2,7 +2,9 @@
 // /ws URL, sends the frames given on the command line (one JSON text frame
 // per argument) and prints every frame it receives, one per line, until the
 // socket closes or --wait elapses. The close code is printed as the last line
-// (close 4409 too_far_behind). It replaces websocat, which is not installed
+// (close 4409 too_far_behind). When the 101 names the instance that
+// accepted the socket (X-Doc-Instance, month 3) that is printed first as
+// "instance doc-9001". It replaces websocat, which is not installed
 // everywhere, and is what scripts/e2e.sh drives.
 //
 //	go run ./cmd/wsprobe --wait 1s 'ws://localhost:9000/ws?doc=1&ticket=…' '{"type":"op","v":0,"op":["hi"],"seq":1}'
@@ -42,6 +44,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close()
+	if instance := resp.Header.Get("X-Doc-Instance"); instance != "" {
+		fmt.Printf("instance %s\n", instance)
+	}
 
 	for _, frame := range flag.Args()[1:] {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {

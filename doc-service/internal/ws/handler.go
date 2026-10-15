@@ -77,7 +77,10 @@ func (h *Handler) Serve(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 
-	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), nil)
+	// The 101 is written on the hijacked connection, so the header the
+	// InstanceHeader middleware set on the ResponseWriter never reaches the
+	// client; it has to travel with the upgrade itself.
+	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), http.Header{middleware.InstanceHeaderName: {h.instanceID}})
 	if err != nil {
 		// The upgrader has already written the 4xx (bad handshake, Origin).
 		return nil

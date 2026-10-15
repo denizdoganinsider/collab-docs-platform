@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,9 +41,11 @@ func main() {
 	docService := service.NewDocumentService(docRepo, memberRepo, opRepo, sessions)
 	memberService := service.NewMemberService(memberRepo)
 
+	var draining atomic.Bool
 	e := controller.NewRouter(controller.Dependencies{
 		GatewayKey: cfg.GatewayKey,
 		InstanceID: cfg.InstanceID,
+		Draining:   &draining,
 		Documents:  controller.NewDocumentController(docService, sessions),
 		Members:    controller.NewMemberController(memberService, sessions),
 		WebSocket:  ws.NewHandler(sessions, docService, cfg.WSAllowedOrigins, cfg.OpMaxBytes, cfg.InstanceID).Serve,
@@ -59,6 +62,17 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
+	// Order matters more than any single step. First /health turns 503,
+	// while everything else keeps being served; then one health interval
+	// passes so the gateway's poller has seen it and stopped routing new
+	// connections here; only then do the sessions and the listener go. Any
+	// other order has the balancer sending sockets to a process that is
+	// about to close them.
+	draining.Store(true)
+	drain := time.Duration(cfg.ShutdownDrainSeconds) * time.Second
+	slog.Info("draining: /health answers 503, sockets stay open", "instance", cfg.InstanceID, "for", drain)
+	time.Sleep(drain)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

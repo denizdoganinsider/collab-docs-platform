@@ -1161,66 +1161,132 @@ commit `Address review findings: …`):
   orphan-op window on delete and the stale-role window during an in-flight
   upgrade are listed under trade-offs.
 
-### Month 3 — December 2026 — Load Balancer *(planned)*
+### Month 3 — December 2026 — Load Balancer *(done, ahead of schedule: 15 October 2026)*
 
-Goal: N doc-service instances behind the gateway, with the sticky-routing
-correctness argument made visible.
+Goal was: N doc-service instances behind the gateway, with the sticky-routing
+correctness argument made visible. That is what exists: two instances (9001,
+9011) by default, every route about one document pinned to one of them, the
+other routes spread, a dead instance's documents refused rather than moved,
+and a shutdown that leaves the pool before it leaves its sockets.
 
-Scope:
+What was built, in the order the roadmap asked for:
 
-1. `gateway/internal/loadbalancer/` ported from chat: `Strategy` interface,
-   `RoundRobin` (over the healthy list), `ConsistentHash` (150 virtual nodes,
-   FNV-1a + MurmurHash3 finalizer — keep the chat project's regression tests
-   `TestConsistentHashSpreadsRoomsEvenly` / `...MovesFewKeysWhenScalingOut`,
-   renamed for documents), health poller (`LB_HEALTH_INTERVAL_SECONDS=5`, one
-   synchronous sweep at startup), `GET /health/backends` (admin).
-2. Per-route strategy in `main.go`:
+1. **`gateway/internal/loadbalancer/`**, ported from the chat project and
+   renamed for documents: `Backend` (URL plus an atomic health flag), `Pool`
+   (fixed membership validated at startup - scheme, host, no duplicates;
+   `Start` runs one synchronous sweep before the listener opens, then polls
+   `/health` every `LB_HEALTH_INTERVAL_SECONDS=5` with a 2 s probe timeout),
+   `Strategy`, `RoundRobin` (counter over the *healthy* list, so a dead
+   instance's turn is not handed to its neighbour twice), `ConsistentHash`
+   (150 virtual nodes per instance, FNV-1a with the MurmurHash3 finalizer -
+   without the mix the near-identical node labels cluster on the ring), and
+   `DocumentKey`, which turns `/ws?doc=42`, `/documents/42`,
+   `/documents/042` and `/documents/42/members/7` into the same key `42`.
+   Tests kept from chat and renamed: `TestConsistentHashSpreadsDocumentsEvenly`
+   (30 000 ids within ±20 % of a third each),
+   `TestConsistentHashMovesFewKeysWhenScalingOut` (15-35 % move when a fourth
+   instance joins; `hash % N` would move 75 %), determinism across rebuilt
+   rings, fail-closed, poller flips both ways, `Close` stops the poller.
+2. **Per-route strategy in `main.go`** through `proxy.NewBalancedProxy`, which
+   picks an instance and then applies the month-1 trust contract unchanged
+   (identity overwritten from the context, `X-Gateway-Key` set,
+   `Authorization` stripped, `X-Request-ID` carried) - the header logic is one
+   helper shared with `NewTrustedProxy`, which stays for months 5-6:
 
-   | Route | Strategy | Why |
-   |---|---|---|
-   | `GET /ws?doc=` | consistent hash on `doc` | the session is in one process's memory |
-   | `/documents/:id` and everything under it | consistent hash on `:id` | the *same* process must serve reads (live session), membership changes (session eviction) and publish (current version) |
-   | `GET /documents`, `POST /documents` | round-robin | user-scoped, any instance can answer from the database |
+   | Route | Strategy |
+   |---|---|
+   | `GET /ws?doc=` | consistent hash on `doc` |
+   | `/documents/:id` and everything under it | consistent hash on `:id` |
+   | `GET /documents`, `POST /documents`, `GET /admin/documents` | round-robin over the healthy list |
 
-   The second row is the difference from the chat project, where only the socket
-   was sticky. Here HTTP writes to a document must reach its session too — a
-   membership removal handled on the wrong instance would leave the evicted user's
-   socket open on the right one.
-3. `INSTANCE_ID` (default `doc-<port>`, validated at startup), `X-Doc-Instance`
-   response header (also on the 101 — pass headers to `Upgrade`), `request_id`
-   shared across the proxy hop.
-4. **Fail closed**: the ring is built over all configured instances and never
-   rebuilt. A document whose instance is down gets `503 "the instance serving
-   this document is unavailable"` until it returns. Same reasoning as chat month 3,
-   with a stronger version: if the ring shrank and two instances ever held the
-   same document, the `(doc_id, version)` primary key would start rejecting
-   writes on one of them — the database backstop mentioned in the schema.
-5. Shutdown ordering: SIGTERM → health endpoint returns 503 immediately → wait one
-   health interval → snapshot and close sockets. The balancer stops sending new
-   connections before the instance stops serving them.
+   The second row is the difference from the chat project, where only the
+   socket was sticky. Here `GET /documents/:id` answers from the live session
+   and a membership removal evicts a socket, so both must reach the process
+   that holds the session. The e2e proves it on both instances: B's socket
+   closes `4003` within a second of A's `DELETE .../members/B`, whichever
+   instance holds the document.
+3. **Instance identity.** `INSTANCE_ID` (default `doc-<port>`) is validated at
+   startup to 1-64 characters of `[A-Za-z0-9._-]`, since it travels in a header
+   and a log field verbatim. doc-service stamps `X-Doc-Instance` on every
+   response through a middleware, and on the 101 by handing the header to
+   `Upgrade` - the upgrader writes the 101 on the hijacked connection, so a
+   header set on the `ResponseWriter` never reaches the client. `wsprobe`
+   prints it as `instance doc-9001` before the frames. `request_id` was already
+   shared across the hop since month 1; the balanced proxy keeps it.
+4. **Fail closed.** The ring is built over all configured instances and never
+   rebuilt. A document whose instance is down gets
+   `503 {"error":"the instance serving this document is unavailable"}`, on
+   the socket (before the upgrade) and on every `/documents/:id` route, until
+   the instance returns - and then it returns on the same instance. A dial
+   failure to an instance the poller still believes in is a `502 "backend
+   unavailable"`, as before; "all instances down" on a round-robin route is
+   `503 "document service unavailable"`. The three are logged apart because
+   they mean different things.
+5. **Shutdown ordering.** On SIGTERM doc-service flips an `atomic.Bool`;
+   `/health` answers `503 {"status":"draining"}` from that instant while the
+   listener and every socket stay up; after `SHUTDOWN_DRAIN_SECONDS=5` (one
+   gateway poll interval - it must not be shorter) the sessions are stopped
+   (pending ops written, snapshots taken, sockets closed `1001`) and then the
+   listener. The balancer therefore stops sending new connections before the
+   instance stops serving them. `/health` is static plus this flag and probes
+   no dependency on purpose: a probe that shares fate with the database would
+   take every instance out of the pool at once during a database blip.
 
-Verification:
+`GET /health/backends` (admin token) shows the pool as the gateway sees it:
+`{"doc_service":[{"backend":"localhost:9001","healthy":true}, …]}`.
+
+Verification (`./scripts/e2e.sh` runs all of this unattended - 130 checks for
+months 1-3, with `LB_HEALTH_INTERVAL_SECONDS=1` and `SHUTDOWN_DRAIN_SECONDS=2`
+to keep it quick; by hand with the services from `Running locally`,
+`PROBE="go run ./cmd/wsprobe"` from `doc-service/`):
 
 ```bash
+# every route about one document lands on one instance; GET /documents does not
 for d in 1 2 3 4; do printf 'doc %s  ' $d; for i in 1 2 3; do
   T=$(curl -s -X POST localhost:9000/ws-ticket -H "Authorization: Bearer $TOKEN_A" | jq -r .ticket)
-  websocat -v "ws://localhost:9000/ws?doc=$d&ticket=$T" 2>&1 </dev/null | grep -o 'X-Doc-Instance: [^ ]*' | tr '\n' ' '
-done; echo; done
-# => doc 1  doc-9001 ×3    doc 2  doc-9011 ×3   ... never mixed
+  $PROBE "ws://localhost:9000/ws?doc=$d&ticket=$T" | awk '$1=="instance" {printf "%s ", $2}'
+done; curl -si localhost:9000/documents/$d -H "Authorization: Bearer $TOKEN_A" | grep -i x-doc-instance; done
+# => doc 1  doc-9011 doc-9011 doc-9011 X-Doc-Instance: doc-9011    doc 2  doc-9001 ×4 ...  never mixed
 
-for i in 1 2 3 4; do curl -si localhost:9000/documents -H "Authorization: Bearer $TOKEN_A" | grep X-Doc-Instance; done
+for i in 1 2 3 4; do curl -si localhost:9000/documents -H "Authorization: Bearer $TOKEN_A" | grep -i x-doc-instance; done
 # => 9001 9011 9001 9011
 
 # membership removal reaches the live session on the right instance
-# (B connected to doc 1 on doc-9001; A removes B) => B's socket closes 4003 within 1 s
+# (B connected to doc 1 on doc-9011; A removes B) => B's socket closes 4003 within 1 s
 
-kill -9 $(lsof -ti :9011); sleep 5
+kill -9 $(lsof -ti TCP:9011 -sTCP:LISTEN); sleep 6
 curl -s localhost:9000/health/backends -H "Authorization: Bearer $TOKEN_ADMIN" | jq -c .doc_service
-# doc hashed to 9011 => 503; doc hashed to 9001 => fine; /documents => 200 always
+# => [{"backend":"localhost:9001","healthy":true},{"backend":"localhost:9011","healthy":false}]
+# doc hashed to 9011 => 503 "the instance serving this document is unavailable"; doc hashed to 9001 => 200; /documents => 200 always
+# restart 9011 => its documents answer from doc-9011 again
+
+kill -TERM $(lsof -ti TCP:9001 -sTCP:LISTEN); curl -si localhost:9001/health | head -1
+# => HTTP/1.1 503 Service Unavailable   (open sockets still live; the pool drops 9001 within one poll; sockets close 1001 after 5 s)
 ```
 
-Exit criteria: no document is ever observed on two instances; the ring tests
-pass; a killed instance's documents come back on the same instance.
+Exit criteria - all met: no document was ever observed on two instances (the
+e2e checks three sockets plus the HTTP read per document, and both instances
+through the eviction test); the ring tests pass; a killed instance's documents
+come back on the same instance.
+
+Known trade-offs, carried from the chat project and stated here on purpose:
+
+- **Availability over strictness.** While an instance is down its documents
+  are unreachable; nothing takes them over. The alternative - rebuilding the
+  ring - is exactly the two-sessions-one-log bug the design exists to prevent,
+  and the `(doc_id, version)` primary key is the backstop if it ever happens.
+- **Membership is configured, not discovered.** Adding an instance means a
+  gateway restart with a longer `DOC_SERVICE_URLS`, which moves about `1/N`
+  of the documents (the ring test proves the bound) and closes their sockets
+  once; the editor reconnects.
+- **One gateway.** Two gateways with the same `DOC_SERVICE_URLS` agree on the
+  ring (the rebuild test), but each polls health on its own, so for one poll
+  interval they can disagree about whether an instance is up.
+- **The drain is a sleep, not a handshake.** doc-service waits a fixed
+  `SHUTDOWN_DRAIN_SECONDS`; it has no way to know the gateway saw the 503.
+  The two values are documented together and the default drain equals the
+  default poll interval. A deployment that shortens the drain below the poll
+  interval reintroduces the window the ordering closes.
 
 ### Month 4 — January 2027 — Caching (Redis) + Rate Limiting *(planned)*
 
@@ -1494,7 +1560,7 @@ transform case is unclear; do not import them.
 
 ## Running locally
 
-Valid as of month 1; later months add processes as listed in their sections.
+Valid as of month 3; later months add processes as listed in their sections.
 
 ```bash
 # 1. MySQL (four schemas, two exist in month 1) + Redis
@@ -1538,7 +1604,8 @@ cd gateway && JWT_SECRET=my-secret-key GATEWAY_SHARED_KEY=dev-gateway-key \
 | gateway | `EDGE_CACHE_MAX_BYTES` | `67108864` | 6 |
 | gateway | `EDGE_CACHE_MAX_OBJECT_BYTES` | `5242880` | 6 |
 | doc-service | `SERVER_PORT` | `9001` | 1 |
-| doc-service | `INSTANCE_ID` | `doc-<SERVER_PORT>` | 3 |
+| doc-service | `INSTANCE_ID` | `doc-<SERVER_PORT>` (1-64 chars of `[A-Za-z0-9._-]`) | 3 |
+| doc-service | `SHUTDOWN_DRAIN_SECONDS` | `5` (≥ the gateway's `LB_HEALTH_INTERVAL_SECONDS`) | 3 |
 | doc-service | `GATEWAY_SHARED_KEY` | *required* | 1 |
 | doc-service | `DB_DSN` | `root:root@tcp(localhost:3308)/docs_service_db?parseTime=true` | 1 |
 | doc-service | `WS_ALLOWED_ORIGINS` | `http://localhost:9000` | 2 |

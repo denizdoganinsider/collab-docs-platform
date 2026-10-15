@@ -27,6 +27,7 @@ func TestPositiveIntRejects(t *testing.T) {
 	}{
 		{"duration string", "SNAPSHOT_EVERY_SECONDS=30s", true},
 		{"zero ring", "OP_RING_SIZE=0", true},
+		{"instance id with a space", "INSTANCE_ID=doc 9001", true},
 		{"valid value", "OP_RING_SIZE=5", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
