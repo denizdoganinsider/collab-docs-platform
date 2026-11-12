@@ -20,6 +20,9 @@ func NewRedis(addr string) *redis.Client {
 		WriteTimeout: 200 * time.Millisecond,
 		PoolTimeout:  300 * time.Millisecond,
 		MaxRetries:   -1,
+		// Without it go-redis bounds socket I/O by Read/WriteTimeout only and
+		// ignores a shorter context deadline from the caller.
+		ContextTimeoutEnabled: true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

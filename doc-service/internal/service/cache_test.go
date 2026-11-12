@@ -15,21 +15,23 @@ type fakeCache struct {
 	lists       map[int64][]domain.DocumentSummary
 	getErr      error
 	sets        int
+	setTokens   []string
 	invalidated []int64
 }
 
 func newFakeCache() *fakeCache { return &fakeCache{lists: map[int64][]domain.DocumentSummary{}} }
 
-func (c *fakeCache) Get(_ context.Context, userID int64) ([]domain.DocumentSummary, bool, error) {
+func (c *fakeCache) Get(_ context.Context, userID int64) ([]domain.DocumentSummary, bool, string, error) {
 	if c.getErr != nil {
-		return nil, false, c.getErr
+		return nil, false, "", c.getErr
 	}
 	docs, ok := c.lists[userID]
-	return docs, ok, nil
+	return docs, ok, "gen", nil
 }
 
-func (c *fakeCache) Set(_ context.Context, userID int64, docs []domain.DocumentSummary) error {
+func (c *fakeCache) Set(_ context.Context, userID int64, docs []domain.DocumentSummary, token string) error {
 	c.sets++
+	c.setTokens = append(c.setTokens, token)
 	c.lists[userID] = docs
 	return nil
 }
@@ -117,6 +119,16 @@ func TestListReadsTheDatabaseOncePerTTL(t *testing.T) {
 	}
 	if docs.listCalls != 1 || s.ListDBReads() != 1 {
 		t.Fatalf("database reads = %d (counter %d), want 1", docs.listCalls, s.ListDBReads())
+	}
+}
+
+// The fill must carry the generation the miss returned, or the cache cannot
+// refuse a fill that an invalidation overtook.
+func TestListFillCarriesTheTokenOfItsMiss(t *testing.T) {
+	s, _, _, cache := newCachedService()
+	_, _ = s.List(1, 1, DefaultPerPage)
+	if len(cache.setTokens) != 1 || cache.setTokens[0] != "gen" {
+		t.Fatalf("Set tokens = %v, want [gen]", cache.setTokens)
 	}
 }
 

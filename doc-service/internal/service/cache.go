@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strconv"
 	"time"
@@ -16,10 +15,14 @@ import (
 
 // DocListCache holds the first page of GET /documents per user. Get's
 // boolean is the hit; an error means the cache could not answer, which the
-// caller must not mistake for "this user has no documents".
+// caller must not mistake for "this user has no documents". On a miss Get
+// also returns a token naming the user's invalidation generation; Set with
+// that token stores the list only if no invalidation ran in between, so a
+// list read from the database before a write cannot overwrite that write's
+// DEL.
 type DocListCache interface {
-	Get(ctx context.Context, userID int64) ([]domain.DocumentSummary, bool, error)
-	Set(ctx context.Context, userID int64, docs []domain.DocumentSummary) error
+	Get(ctx context.Context, userID int64) (docs []domain.DocumentSummary, hit bool, token string, err error)
+	Set(ctx context.Context, userID int64, docs []domain.DocumentSummary, token string) error
 	Invalidate(ctx context.Context, userIDs ...int64) error
 }
 
@@ -46,24 +49,45 @@ func NewRedisDocListCache(client *redis.Client, ttl time.Duration) *RedisDocList
 
 func docListKey(userID int64) string { return "doclist:" + strconv.FormatInt(userID, 10) }
 
-func (c *RedisDocListCache) Get(ctx context.Context, userID int64) ([]domain.DocumentSummary, bool, error) {
-	raw, err := c.client.Get(ctx, docListKey(userID)).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return nil, false, nil
-	}
+// docListGenKey counts a user's invalidations. It outlives any list read in
+// flight by a wide margin; once it expires with no invalidation pending,
+// "absent" compares equal to "absent" and nothing is lost.
+func docListGenKey(userID int64) string { return "doclist:gen:" + strconv.FormatInt(userID, 10) }
+
+const docListGenTTL = 10 * time.Minute
+
+// setIfGenerationScript is the compare-and-set: the list is written only
+// when the generation still equals the one read before the database query.
+var setIfGenerationScript = redis.NewScript(`
+local gen = redis.call('GET', KEYS[2]) or ''
+if gen ~= ARGV[2] then
+	return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+return 1
+`)
+
+func (c *RedisDocListCache) Get(ctx context.Context, userID int64) ([]domain.DocumentSummary, bool, string, error) {
+	vals, err := c.client.MGet(ctx, docListKey(userID), docListGenKey(userID)).Result()
 	if err != nil {
-		return nil, false, err
+		return nil, false, "", err
+	}
+	token, _ := vals[1].(string)
+	raw, ok := vals[0].(string)
+	if !ok {
+		return nil, false, token, nil
 	}
 	docs := make([]domain.DocumentSummary, 0)
-	if err := json.Unmarshal(raw, &docs); err != nil {
-		return nil, false, err
+	if err := json.Unmarshal([]byte(raw), &docs); err != nil {
+		return nil, false, "", err
 	}
-	return docs, true, nil
+	return docs, true, token, nil
 }
 
 // Set stores the empty list too: without it a user with no documents is a
-// database read on every poll.
-func (c *RedisDocListCache) Set(ctx context.Context, userID int64, docs []domain.DocumentSummary) error {
+// database read on every poll. It stores nothing when an invalidation ran
+// after the Get that produced token.
+func (c *RedisDocListCache) Set(ctx context.Context, userID int64, docs []domain.DocumentSummary, token string) error {
 	if docs == nil {
 		docs = []domain.DocumentSummary{}
 	}
@@ -71,18 +95,25 @@ func (c *RedisDocListCache) Set(ctx context.Context, userID int64, docs []domain
 	if err != nil {
 		return err
 	}
-	return c.client.Set(ctx, docListKey(userID), raw, c.ttl).Err()
+	keys := []string{docListKey(userID), docListGenKey(userID)}
+	return setIfGenerationScript.Run(ctx, c.client, keys, raw, token, c.ttl.Milliseconds()).Err()
 }
 
+// Invalidate drops each list and moves its generation in one transaction,
+// so a fill that read the database before this call can no longer land.
 func (c *RedisDocListCache) Invalidate(ctx context.Context, userIDs ...int64) error {
 	if len(userIDs) == 0 {
 		return nil
 	}
-	keys := make([]string, len(userIDs))
-	for i, id := range userIDs {
-		keys[i] = docListKey(id)
-	}
-	return c.client.Del(ctx, keys...).Err()
+	_, err := c.client.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		for _, id := range userIDs {
+			p.Del(ctx, docListKey(id))
+			p.Incr(ctx, docListGenKey(id))
+			p.PExpire(ctx, docListGenKey(id), docListGenTTL)
+		}
+		return nil
+	})
+	return err
 }
 
 // invalidateUsers drops the given users' lists. A failure is logged and

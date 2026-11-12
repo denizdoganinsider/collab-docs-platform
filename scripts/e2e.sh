@@ -42,6 +42,8 @@ req() {
 }
 
 cleanup() {
+  # The month-4 block pauses Redis; an interrupted run must not leave it so.
+  docker unpause docs_redis >/dev/null 2>&1
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
   # doc-service instances are started by port; go run leaves the compiled
   # gateway child listening too, so kill by port.
@@ -490,8 +492,14 @@ RA=$(curl -s -o /dev/null -D - "$GW/me" -H "Authorization: Bearer $TOKEN_E" | aw
 expect "429 carries Retry-After in 1..60 s" "yes" "$([ -n "$RA" ] && [ "$RA" -ge 1 ] && [ "$RA" -le 60 ] && echo yes || echo "no ($RA)")"
 expect "another user is unaffected" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$GW/me" -H "Authorization: Bearer $TOKEN_D")"
 expect "the limiter key is the user id, a sorted set of 120" "zset 120" "$(redis TYPE "rl:http:u:$ID_E") $(redis ZCARD "rl:http:u:$ID_E")"
-expect "a forged X-Forwarded-For does not buy a fresh IP bucket" "true" \
-  "$(curl -s -X POST "$GW/login" -H "$JSON" -H 'X-Forwarded-For: 203.0.113.9' -d '{}' >/dev/null; [ "$(redis EXISTS 'rl:http:ip:203.0.113.9')" = 0 ] && echo true || echo false)"
+# Public routes count against the socket peer's IP. Both halves are needed:
+# "no bucket for the forged address" alone also passes with no IP limiter.
+IP_KEYS() { redis --scan --pattern 'rl:http:ip:*' | grep -E '^rl:http:ip:(::1|127\.0\.0\.1)$'; }
+BEFORE=$(for k in $(IP_KEYS); do redis ZCARD "$k"; done | awk '{s+=$1} END {print s+0}')
+curl -s -o /dev/null -X POST "$GW/login" -H "$JSON" -H 'X-Forwarded-For: 203.0.113.9' -d '{}'
+AFTER=$(for k in $(IP_KEYS); do redis ZCARD "$k"; done | awk '{s+=$1} END {print s+0}')
+expect "a public request is counted in the peer IP's bucket" "$((BEFORE+1))" "$AFTER"
+expect "a forged X-Forwarded-For does not buy a fresh IP bucket" "0" "$(redis EXISTS 'rl:http:ip:203.0.113.9')"
 
 # The body is built outside $(...): bash 3.2 (macOS) mis-parses escaped
 # quotes inside a command substitution that is itself in double quotes.

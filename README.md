@@ -1303,7 +1303,9 @@ What was built:
 
 1. **Redis client in both services** (`config/redis.go`, `REDIS_ADDR`,
    default `localhost:6381`). 200 ms dial/read/write timeouts, no retries,
-   and a ping at boot before the listener opens, so the first request never
+   context deadlines enforced on socket I/O (`ContextTimeoutEnabled`), so a
+   caller's shorter bound - 100 ms per WebSocket op - is the real one, and a
+   ping at boot before the listener opens, so the first request never
    pays for the dial inside its own timeout. The client never makes the
    process exit: a Redis that is down at boot is a degraded start.
 2. **Document-list cache** (`doc-service/internal/service/cache.go`):
@@ -1317,10 +1319,19 @@ What was built:
      invalidating a key family instead of one key.
    - **The empty list is cached too** (negative caching). Without it a user
      with no documents costs a database read on every poll.
-   - **A Redis error is not a miss.** `Get` returns `(docs, hit, err)`; on an
-     error the read goes to the database and nothing is written back to the
-     cache that just failed.
-   - Invalidation (`DEL`, after the database write has committed):
+   - **A Redis error is not a miss.** `Get` returns `(docs, hit, token, err)`;
+     on an error the read goes to the database and nothing is written back to
+     the cache that just failed.
+   - **A fill cannot overwrite a newer invalidation.** Each user has a
+     generation counter, `doclist:gen:<user_id>` (10 min TTL). Invalidation
+     is `DEL` + `INCR` of the generation in one `MULTI`; a miss reads the
+     generation together with the list (`MGET`), and the write-back is a Lua
+     compare-and-set that stores the list only if the generation has not
+     moved. Without it, a list read from MySQL just before a share could be
+     written back just after the share's `DEL`, hiding the shared document
+     for the whole TTL.
+   - Invalidation (`DEL` + generation bump, after the database write has
+     committed):
      | Write | Keys dropped |
      |---|---|
      | create | the owner's |
@@ -1373,7 +1384,15 @@ What was built:
    - `op` frames: a **token bucket per connection** in memory
      (`golang.org/x/time/rate`), `WS_OPS_PER_SECOND=20`, `WS_OPS_BURST=40`.
      Over the rate: `{"type":"error","code":"rate_limited"}` and the frame is
-     not delivered; the third within 10 s closes the socket with **4429**.
+     not delivered; the third over-rate frame within 10 s closes the socket
+     with **4429** instead of a third error.
+   - The editor never trips this by typing: it sends at most one op every
+     67 ms (about 15/s) and composes the keystrokes in between into its
+     buffer. If it is answered `rate_limited` anyway, the refused op stays
+     outstanding (no ack will come for it), the buffer is folded into it, and
+     it is sent again after 250 ms. Before this, a refused op left the editor
+     waiting for an ack that never came, with every later edit queued behind
+     it.
    - `op` frames: a **per-user counter across connections and instances**,
      Redis `INCR` + `PEXPIRE` in one script, `WS_OPS_PER_MINUTE_PER_USER=600`;
      over it, close 4429. A frame the local bucket already refused is not
@@ -1424,7 +1443,7 @@ curl -s localhost:9001/health; curl -s localhost:9011/health            # list_d
 for i in $(seq 1 130); do curl -s -o /dev/null -w '%{http_code}\n' localhost:9000/me -H "Authorization: Bearer $TOKEN_A"; done | sort | uniq -c
 # => 120 × 200, 10 × 429 (with Retry-After)
 $PROBE --flood 100 "ws://localhost:9000/ws?doc=$DOC&ticket=$T" | tail -3
-# => acks, then {"type":"error","code":"rate_limited",...} ×3, then close 4429 rate_limited
+# => acks, then {"type":"error","code":"rate_limited",...} ×2, then close 4429 rate_limited
 for i in $(seq 1 6); do curl -s -X POST localhost:9000/login -H "$JSON" -d '{"email":"a@test.com","password":"wrong"}' -w ' %{http_code}\n'; done
 # => 5 × 401, then 429 - and the right password is 429 too until the window ends
 
@@ -1447,11 +1466,11 @@ Known trade-offs, stated here on purpose:
   For a learning system that is the right side to fail on; a system whose
   limits protect money or third-party quotas would fail closed, or fall back
   to an in-process limiter per instance.
-- **Invalidation races are bounded by the TTL, not prevented.** A read that
-  misses, loads the old list, and writes it back *after* a concurrent write's
-  `DEL` leaves that list stale for up to 300 s. A failed `DEL` (Redis blip
-  after the commit) does the same. Versioned keys or a short TTL on a
-  write-back would close it; neither is worth it for a list view.
+- **A failed invalidation is bounded by the TTL, not prevented.** The
+  generation check closes the fill-after-invalidate race, but if the `DEL`
+  itself fails (a Redis blip after the database commit) the old list stays
+  until its 300 s TTL. An outbox for invalidations would close it; not worth
+  it for a list view.
 - **No stampede protection.** N simultaneous misses for one user are N
   database reads (single-flight would be the fix). Per-user keys keep N
   small.

@@ -147,9 +147,11 @@ func (s *DocumentService) List(userID int64, page, perPage int) ([]domain.Docume
 	cacheable := s.cache != nil && page == 1 && perPage == DefaultPerPage
 
 	cacheUp := cacheable
+	var token string
 	if cacheable {
 		ctx, cancel := cacheContext()
-		docs, hit, err := s.cache.Get(ctx, userID)
+		docs, hit, gen, err := s.cache.Get(ctx, userID)
+		token = gen
 		cancel()
 		switch {
 		case err != nil:
@@ -168,7 +170,7 @@ func (s *DocumentService) List(userID int64, page, perPage int) ([]domain.Docume
 
 	if cacheUp {
 		ctx, cancel := cacheContext()
-		if err := s.cache.Set(ctx, userID, docs); err != nil {
+		if err := s.cache.Set(ctx, userID, docs, token); err != nil {
 			slog.Warn("doclist cache write failed", "service", "doc-service", "user_id", userID, "error", err)
 		}
 		cancel()
