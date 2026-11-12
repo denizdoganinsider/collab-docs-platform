@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"collab-docs-platform/gateway/internal/ratelimit"
 	"collab-docs-platform/gateway/internal/service"
 
+	"github.com/labstack/echo/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -73,5 +76,48 @@ func TestLogin_InvalidBodyIsNotCounted(t *testing.T) {
 	call(t, ac.Login, http.MethodPost, `{"email":"","password":""}`, nil)
 	if len(limiter.keys) != 0 {
 		t.Fatal("a request without credentials was counted")
+	}
+}
+
+// loginFrom posts a login from remoteAddr through an Echo that reads the
+// client IP from the socket peer, as the gateway's main does.
+func loginFrom(t *testing.T, ac *AuthController, remoteAddr, xff string) {
+	t.Helper()
+	e := echo.New()
+	e.IPExtractor = echo.ExtractIPDirect()
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"email":"a@x.com","password":"Passw0rd1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remoteAddr
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	if err := ac.Login(e.NewContext(req, httptest.NewRecorder())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The guard is per email AND client IP: one address cannot lock the
+// account out for everybody, and a forged X-Forwarded-For is not an address.
+func TestLogin_LimiterKeyIsPerClientIP(t *testing.T) {
+	limiter := &stubLoginLimiter{d: ratelimit.Decision{Allowed: true}}
+	ac := NewAuthController(service.NewUserService(knownUserRepo(t)), limiter)
+
+	loginFrom(t, ac, "198.51.100.7:4000", "")
+	loginFrom(t, ac, "198.51.100.7:4001", "")
+	loginFrom(t, ac, "203.0.113.9:4000", "")
+	loginFrom(t, ac, "198.51.100.7:4002", "192.0.2.55")
+
+	k := limiter.keys
+	if len(k) != 4 {
+		t.Fatalf("keys = %v, want 4", k)
+	}
+	if k[0] != k[1] {
+		t.Error("the same IP on another source port got another key")
+	}
+	if k[0] == k[2] {
+		t.Error("two client IPs share one key")
+	}
+	if k[0] != k[3] {
+		t.Error("X-Forwarded-For changed the key")
 	}
 }
