@@ -38,6 +38,14 @@ type Config struct {
 	// Origins allowed to open a WebSocket. A missing Origin header is
 	// allowed (native clients); a present one must be in this list.
 	WSAllowedOrigins []string
+
+	// Shared store of the document-list cache and the per-user op counter.
+	// Down means the cache is bypassed and the counter fails open.
+	RedisAddr          string
+	DocListTTLSeconds  int
+	WSOpRate           int
+	WSOpBurst          int
+	WSUserOpsPerMinute int
 }
 
 func LoadConfig() *Config {
@@ -62,6 +70,12 @@ func LoadConfig() *Config {
 		ShutdownDrainSeconds: positiveInt("SHUTDOWN_DRAIN_SECONDS", 5),
 
 		WSAllowedOrigins: getEnvList("WS_ALLOWED_ORIGINS", []string{"http://localhost:9000"}),
+
+		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6381"),
+		DocListTTLSeconds:  positiveInt("DOCLIST_CACHE_TTL_SECONDS", 300),
+		WSOpRate:           positiveInt("WS_OPS_PER_SECOND", 20),
+		WSOpBurst:          positiveInt("WS_OPS_BURST", 40),
+		WSUserOpsPerMinute: positiveInt("WS_OPS_PER_MINUTE_PER_USER", 600),
 	}
 }
 

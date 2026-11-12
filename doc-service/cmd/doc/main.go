@@ -26,6 +26,10 @@ func main() {
 	db := config.NewDatabase(cfg.DBDSN)
 	defer db.Close()
 
+	rdb := config.NewRedis(cfg.RedisAddr)
+	defer rdb.Close()
+	listCache := service.NewRedisDocListCache(rdb, time.Duration(cfg.DocListTTLSeconds)*time.Second)
+
 	docRepo := repository.NewDocumentRepository(db)
 	memberRepo := repository.NewMemberRepository(db)
 	opRepo := repository.NewOpRepository(db)
@@ -36,19 +40,28 @@ func main() {
 	limits.SnapshotEveryOps = cfg.SnapshotEveryOps
 	limits.SnapshotEvery = time.Duration(cfg.SnapshotEverySeconds) * time.Second
 	limits.Idle = time.Duration(cfg.SessionIdleSeconds) * time.Second
-	sessions := session.NewManager(repository.NewSessionStore(docRepo, opRepo), limits)
+	store := service.InvalidatingStore{Store: repository.NewSessionStore(docRepo, opRepo), Members: memberRepo, Cache: listCache}
+	sessions := session.NewManager(store, limits)
 
 	docService := service.NewDocumentService(docRepo, memberRepo, opRepo, sessions)
+	docService.UseListCache(listCache)
 	memberService := service.NewMemberService(memberRepo)
+	memberService.UseListCache(listCache)
+
+	wsLimits := ws.DefaultLimits()
+	wsLimits.OpRate = float64(cfg.WSOpRate)
+	wsLimits.OpBurst = cfg.WSOpBurst
+	wsLimits.UserOps = ws.NewRedisUserOps(rdb, cfg.WSUserOpsPerMinute)
 
 	var draining atomic.Bool
 	e := controller.NewRouter(controller.Dependencies{
-		GatewayKey: cfg.GatewayKey,
-		InstanceID: cfg.InstanceID,
-		Draining:   &draining,
-		Documents:  controller.NewDocumentController(docService, sessions),
-		Members:    controller.NewMemberController(memberService, sessions),
-		WebSocket:  ws.NewHandler(sessions, docService, cfg.WSAllowedOrigins, cfg.OpMaxBytes, cfg.InstanceID).Serve,
+		GatewayKey:  cfg.GatewayKey,
+		InstanceID:  cfg.InstanceID,
+		Draining:    &draining,
+		ListDBReads: docService.ListDBReads,
+		Documents:   controller.NewDocumentController(docService, sessions),
+		Members:     controller.NewMemberController(memberService, sessions),
+		WebSocket:   ws.NewHandler(sessions, docService, cfg.WSAllowedOrigins, cfg.OpMaxBytes, cfg.InstanceID, wsLimits).Serve,
 	})
 
 	go func() {

@@ -63,7 +63,7 @@ func newLiveServer(t *testing.T) *liveServer {
 		InstanceID: "doc-test",
 		Documents:  NewDocumentController(docs, sessions),
 		Members:    NewMemberController(service.NewMemberService(memberRepo), sessions),
-		WebSocket:  ws.NewHandler(sessions, docs, nil, 65536, "doc-test").Serve,
+		WebSocket:  ws.NewHandler(sessions, docs, nil, 65536, "doc-test", ws.DefaultLimits()).Serve,
 	})
 	srv := httptest.NewServer(e)
 	t.Cleanup(func() {

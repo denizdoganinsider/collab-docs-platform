@@ -33,13 +33,14 @@ type Handler struct {
 	upgrader   websocket.Upgrader
 	maxBytes   int64
 	instanceID string
+	limits     Limits
 }
 
 // NewHandler builds the upgrade handler. A missing Origin header is allowed
 // and a present one must be in allowedOrigins: cross-site WebSocket
 // hijacking is a browser attack, browsers always send Origin, and refusing
 // native clients (the probe, websocat) would buy nothing.
-func NewHandler(sessions *session.Manager, access Access, allowedOrigins []string, maxBytes int, instanceID string) *Handler {
+func NewHandler(sessions *session.Manager, access Access, allowedOrigins []string, maxBytes int, instanceID string, limits Limits) *Handler {
 	return &Handler{
 		sessions: sessions,
 		access:   access,
@@ -53,6 +54,7 @@ func NewHandler(sessions *session.Manager, access Access, allowedOrigins []strin
 		},
 		maxBytes:   int64(maxBytes),
 		instanceID: instanceID,
+		limits:     limits,
 	}
 }
 
@@ -87,7 +89,7 @@ func (h *Handler) Serve(c echo.Context) error {
 	}
 	conn.SetReadLimit(h.maxBytes)
 
-	client := newClient(conn, userID)
+	client := newClient(conn, userID, h.limits)
 	s, err := h.sessions.Join(docID, client, role, members)
 	if err != nil {
 		code, reason := session.CloseServerError, "internal error"

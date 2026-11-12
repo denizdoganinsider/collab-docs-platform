@@ -9,11 +9,16 @@ import (
 
 type MemberService struct {
 	members MemberRepositoryInterface
+	cache   DocListCache
 }
 
 func NewMemberService(members MemberRepositoryInterface) *MemberService {
 	return &MemberService{members: members}
 }
+
+// UseListCache makes share, re-role and removal drop the target's cached
+// document list.
+func (s *MemberService) UseListCache(cache DocListCache) { s.cache = cache }
 
 func (s *MemberService) roleOf(docID, userID int64) (string, error) {
 	role, err := s.members.GetRole(docID, userID)
@@ -57,6 +62,7 @@ func (s *MemberService) Set(docID, actorID, targetID int64, role string) (*domai
 	if err := s.members.Upsert(docID, targetID, role); err != nil {
 		return nil, err
 	}
+	invalidateUsers(s.cache, "member set", targetID)
 
 	return &domain.Member{UserID: targetID, Role: role}, nil
 }
@@ -80,5 +86,6 @@ func (s *MemberService) Remove(docID, actorID, targetID int64) error {
 	if !removed {
 		return ErrNotFound
 	}
+	invalidateUsers(s.cache, "member remove", targetID)
 	return nil
 }

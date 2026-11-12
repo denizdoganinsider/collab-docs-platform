@@ -3,7 +3,9 @@ package service
 import (
 	"database/sql"
 	"errors"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"collab-docs-platform/doc-service/internal/domain"
@@ -55,11 +57,23 @@ type DocumentService struct {
 	members MemberRepositoryInterface
 	ops     OpRepositoryInterface
 	live    LiveDocuments
+
+	// nil means no cache: every list read goes to the database.
+	cache DocListCache
+	// listDBReads counts per-user list queries that reached the database,
+	// so "N list requests, 1 database read" is observable on /health.
+	listDBReads atomic.Int64
 }
 
 func NewDocumentService(docs DocumentRepositoryInterface, members MemberRepositoryInterface, ops OpRepositoryInterface, live LiveDocuments) *DocumentService {
 	return &DocumentService{docs: docs, members: members, ops: ops, live: live}
 }
+
+// UseListCache puts cache in front of the first page of List and makes the
+// writes that change a list invalidate it.
+func (s *DocumentService) UseListCache(cache DocListCache) { s.cache = cache }
+
+func (s *DocumentService) ListDBReads() int64 { return s.listDBReads.Load() }
 
 // DocumentView is GET /documents/:id: the document, the caller's role and
 // the member list, in one response.
@@ -116,6 +130,7 @@ func (s *DocumentService) Create(ownerID int64, title string) (*domain.DocumentS
 	if err := s.docs.Create(doc); err != nil {
 		return nil, err
 	}
+	invalidateUsers(s.cache, "create", ownerID)
 
 	return &domain.DocumentSummary{
 		ID: doc.ID, OwnerID: doc.OwnerID, Title: doc.Title, Version: doc.Version,
@@ -123,9 +138,44 @@ func (s *DocumentService) Create(ownerID int64, title string) (*domain.DocumentS
 	}, nil
 }
 
+// List serves the first page at the default size from the cache when it
+// can; any other page is rare enough to read through. A cache error is not
+// a miss: the read goes to the database and nothing is written back to a
+// cache that just failed.
 func (s *DocumentService) List(userID int64, page, perPage int) ([]domain.DocumentSummary, error) {
 	page, perPage = clampPage(page, perPage)
-	return s.docs.ListForUser(userID, perPage, (page-1)*perPage)
+	cacheable := s.cache != nil && page == 1 && perPage == DefaultPerPage
+
+	cacheUp := cacheable
+	var token string
+	if cacheable {
+		ctx, cancel := cacheContext()
+		docs, hit, gen, err := s.cache.Get(ctx, userID)
+		token = gen
+		cancel()
+		switch {
+		case err != nil:
+			slog.Warn("doclist cache unavailable, reading the database", "service", "doc-service", "user_id", userID, "error", err)
+			cacheUp = false
+		case hit:
+			return docs, nil
+		}
+	}
+
+	s.listDBReads.Add(1)
+	docs, err := s.docs.ListForUser(userID, perPage, (page-1)*perPage)
+	if err != nil {
+		return nil, err
+	}
+
+	if cacheUp {
+		ctx, cancel := cacheContext()
+		if err := s.cache.Set(ctx, userID, docs, token); err != nil {
+			slog.Warn("doclist cache write failed", "service", "doc-service", "user_id", userID, "error", err)
+		}
+		cancel()
+	}
+	return docs, nil
 }
 
 func (s *DocumentService) Get(docID, userID int64) (*DocumentView, error) {
@@ -188,6 +238,7 @@ func (s *DocumentService) Rename(docID, userID int64, title string) (*domain.Doc
 	if err := s.docs.UpdateTitle(docID, title); err != nil {
 		return nil, err
 	}
+	invalidateDocument(s.cache, s.members, docID, "rename")
 
 	doc, err := s.docs.GetByID(docID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -213,7 +264,22 @@ func (s *DocumentService) Delete(docID, userID int64) error {
 	if role != domain.RoleOwner {
 		return ErrForbidden
 	}
-	return s.docs.Delete(docID)
+
+	// The members go with the document, so they are read before it.
+	var affected []int64
+	if s.cache != nil {
+		members, err := s.members.List(docID)
+		if err != nil {
+			return err
+		}
+		affected = memberIDs(members)
+	}
+
+	if err := s.docs.Delete(docID); err != nil {
+		return err
+	}
+	invalidateUsers(s.cache, "delete", affected...)
+	return nil
 }
 
 // ListOps is the catch-up read: every member (viewers included) may read the

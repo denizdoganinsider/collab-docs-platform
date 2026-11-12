@@ -75,7 +75,7 @@ func newDBHarness(t *testing.T) *dbHarness {
 	}
 
 	e := echo.New()
-	e.GET("/ws", NewHandler(sessions, docs, nil, 65536, "doc-test").Serve, middleware.GatewayAuth(testKey))
+	e.GET("/ws", NewHandler(sessions, docs, nil, 65536, "doc-test", unlimited).Serve, middleware.GatewayAuth(testKey))
 	srv := httptest.NewServer(e)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -85,6 +85,10 @@ func newDBHarness(t *testing.T) *dbHarness {
 	})
 	return &dbHarness{t: t, srv: srv, sessions: sessions, docs: docs, docID: created.ID}
 }
+
+// unlimited keeps the frame limiter out of the latency measurement, which
+// sends faster than any typist on purpose.
+var unlimited = Limits{OpRate: 1e6, OpBurst: 1e6, CursorRate: 1e6, Strikes: 3, StrikeWindow: 10 * time.Second}
 
 func (h *dbHarness) dial(userID int64) (*websocket.Conn, int) {
 	h.t.Helper()

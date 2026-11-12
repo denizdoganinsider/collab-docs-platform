@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# End-to-end test for months 1 to 3: starts two doc-service instances and the
-# gateway against the compose MySQL, registers fresh users, walks the README
+# End-to-end test for months 1 to 4: starts two doc-service instances and the
+# gateway against the compose MySQL and Redis, registers fresh users, walks the README
 # verification flows (HTTP and WebSocket, the latter through cmd/wsprobe) plus
 # the permission matrix, kills an instance with -9 and checks nothing acked
 # was lost, then proves the balancer's stickiness, fail-closed and drain
-# behaviour. Exits non-zero on any failed expectation. Requires: docker
-# (docs_mysql healthy), curl, jq, go, lsof.
+# behaviour, then the Redis cache, the four rate limiters and their fail-open
+# path (Redis paused). Exits non-zero on any failed expectation. Requires:
+# docker (docs_mysql and docs_redis healthy), curl, jq, go, lsof.
 #
 #   ./scripts/e2e.sh            # default ports 9000 / 9001 / 9011
 #   GW_PORT=9100 DOC_PORT=9101 DOC_PORT2=9111 ./scripts/e2e.sh
@@ -41,6 +42,8 @@ req() {
 }
 
 cleanup() {
+  # The month-4 block pauses Redis; an interrupted run must not leave it so.
+  docker unpause docs_redis >/dev/null 2>&1
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
   # doc-service instances are started by port; go run leaves the compiled
   # gateway child listening too, so kill by port.
@@ -56,10 +59,13 @@ for tool in docker curl jq go lsof; do command -v "$tool" >/dev/null || { echo "
 if [ "$(docker inspect -f '{{.State.Health.Status}}' docs_mysql 2>/dev/null)" != "healthy" ]; then
   echo "docs_mysql is not healthy; run: docker compose up -d"; exit 2
 fi
+if [ "$(docker inspect -f '{{.State.Health.Status}}' docs_redis 2>/dev/null)" != "healthy" ]; then
+  echo "docs_redis is not healthy; run: docker compose up -d"; exit 2
+fi
 if lsof -ti ":$GW_PORT" -ti ":$DOC_PORT" -ti ":$DOC_PORT2" >/dev/null 2>&1; then
   echo "port $GW_PORT, $DOC_PORT or $DOC_PORT2 already in use"; exit 2
 fi
-ok "mysql healthy, ports free"
+ok "mysql and redis healthy, ports free"
 
 # ---- start services --------------------------------------------------------
 say "starting services"
@@ -83,8 +89,8 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 expect "gateway /health" '{"status":"ok"}' "$(curl -s "$GW/health")"
-expect "doc-service /health" "{\"instance\":\"doc-$DOC_PORT\",\"status\":\"ok\"}" "$(curl -s "$DOC/health")"
-expect "second doc-service /health" "{\"instance\":\"doc-$DOC_PORT2\",\"status\":\"ok\"}" "$(curl -s "$DOC2/health")"
+expect "doc-service /health" "doc-$DOC_PORT ok" "$(curl -s "$DOC/health" | jq -r '"\(.instance) \(.status)"')"
+expect "second doc-service /health" "doc-$DOC_PORT2 ok" "$(curl -s "$DOC2/health" | jq -r '"\(.instance) \(.status)"')"
 expect "every doc-service response names its instance" "doc-$DOC_PORT" "$(curl -s -o /dev/null -D - "$DOC/nope" | awk 'tolower($1)=="x-doc-instance:" {print $2}' | tr -d '\r')"
 
 # ---- static + routing ------------------------------------------------------
@@ -426,6 +432,124 @@ sleep 1.5
 req GET /health/backends "$TOKEN_ADMIN"
 expect "both instances healthy again" "true true" "$(echo "$BODY" | jq -r '.doc_service[].healthy' | tr '\n' ' ' | sed 's/ $//')"
 for D in $LB_DOCS; do req DELETE "/documents/$D" "$TOKEN_A"; done
+
+# ---- month 4: cache ---------------------------------------------------------
+say "month 4: document-list cache (Redis)"
+redis() { docker exec docs_redis redis-cli "$@"; }
+list_reads() { echo $(( $(curl -s "$DOC/health" | jq -r .list_db_reads) + $(curl -s "$DOC2/health" | jq -r .list_db_reads) )); }
+EMAIL_D="e2e-d-$SUFFIX@test.com"; EMAIL_E="e2e-e-$SUFFIX@test.com"
+req POST /register "" "{\"email\":\"$EMAIL_D\",\"password\":\"$PW\"}"; ID_D=$(echo "$BODY" | jq -r .id)
+req POST /register "" "{\"email\":\"$EMAIL_E\",\"password\":\"$PW\"}"; ID_E=$(echo "$BODY" | jq -r .id)
+TOKEN_D=$(login "$EMAIL_D"); TOKEN_E=$(login "$EMAIL_E")
+
+req GET /documents "$TOKEN_D"
+expect "new user's empty list -> 200 []" "200 []" "$STATUS $(echo "$BODY" | jq -c .)"
+expect "the empty list is cached too (negative caching)" "1 []" "$(redis EXISTS "doclist:$ID_D") $(redis GET "doclist:$ID_D")"
+TTL=$(redis TTL "doclist:$ID_D")
+expect "doclist TTL is at most 300 s" "yes" "$([ "$TTL" -gt 0 ] && [ "$TTL" -le 300 ] && echo yes || echo "no ($TTL)")"
+R0=$(list_reads)
+for _ in 1 2 3 4 5 6; do req GET /documents "$TOKEN_D"; done
+expect "6 more list reads across both instances, 0 database reads" "$R0" "$(list_reads)"
+req GET "/documents?page=2" "$TOKEN_D"
+expect "page 2 is not cached: one database read" "$((R0+1))" "$(list_reads)"
+
+req POST /documents "$TOKEN_A" '{"title":"Cached"}'; CDOC=$(echo "$BODY" | jq -r .id)
+req GET /documents "$TOKEN_A"
+expect "owner's list cached" "1" "$(redis EXISTS "doclist:$ID_A")"
+req PUT "/documents/$CDOC/members/$ID_D" "$TOKEN_A" '{"role":"editor"}'
+expect "share drops the member's list (written on the doc's instance, read anywhere)" "0" "$(redis EXISTS "doclist:$ID_D")"
+req GET /documents "$TOKEN_D"
+expect "member sees the shared document at once" "$CDOC" "$(echo "$BODY" | jq -r '.[0].id')"
+req GET /documents "$TOKEN_A"
+req PATCH "/documents/$CDOC" "$TOKEN_A" '{"title":"Cached renamed"}'
+expect "rename drops every member's list" "0 0" "$(redis EXISTS "doclist:$ID_A") $(redis EXISTS "doclist:$ID_D")"
+req GET /documents "$TOKEN_D"
+expect "member sees the new title" "Cached renamed" "$(echo "$BODY" | jq -r '.[0].title')"
+
+# A snapshot moves updated_at, so it must drop the lists too. The last
+# socket leaving a dirty document writes one.
+req GET /documents "$TOKEN_D"
+"$PROBE" --wait 500ms "$WS?doc=$CDOC&ticket=$(ticket "$TOKEN_A")" '{"type":"op","v":0,"op":["snap"],"seq":1}' >/dev/null
+for _ in $(seq 1 20); do [ "$(redis EXISTS "doclist:$ID_D")" = 0 ] && break; sleep 0.25; done
+expect "snapshot drops every member's list" "0" "$(redis EXISTS "doclist:$ID_D")"
+req GET /documents "$TOKEN_D"
+expect "member's list shows the snapshotted version" "1" "$(echo "$BODY" | jq -r '.[0].version')"
+
+req DELETE "/documents/$CDOC/members/$ID_D" "$TOKEN_A"
+req GET /documents "$TOKEN_D"
+expect "removed member's list is empty again" "[]" "$(echo "$BODY" | jq -c .)"
+req GET /documents "$TOKEN_D"; req GET /documents "$TOKEN_A"
+req PUT "/documents/$CDOC/members/$ID_D" "$TOKEN_A" '{"role":"viewer"}'
+req GET /documents "$TOKEN_D"; req GET /documents "$TOKEN_A"
+req DELETE "/documents/$CDOC" "$TOKEN_A"
+expect "delete drops every member's list" "0 0" "$(redis EXISTS "doclist:$ID_A") $(redis EXISTS "doclist:$ID_D")"
+
+# ---- month 4: rate limiting -------------------------------------------------
+say "month 4: rate limiting"
+expect "130 x GET /me in a minute -> 120 x 200, 10 x 429" "120x200 10x429" \
+  "$(for _ in $(seq 1 130); do curl -s -o /dev/null -w '%{http_code}\n' "$GW/me" -H "Authorization: Bearer $TOKEN_E"; done | sort | uniq -c | awk '{printf "%s%sx%s", sep, $1, $2; sep=" "}')"
+RA=$(curl -s -o /dev/null -D - "$GW/me" -H "Authorization: Bearer $TOKEN_E" | awk 'tolower($1)=="retry-after:" {print $2}' | tr -d '\r')
+expect "429 carries Retry-After in 1..60 s" "yes" "$([ -n "$RA" ] && [ "$RA" -ge 1 ] && [ "$RA" -le 60 ] && echo yes || echo "no ($RA)")"
+expect "another user is unaffected" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$GW/me" -H "Authorization: Bearer $TOKEN_D")"
+expect "the limiter key is the user id, a sorted set of 120" "zset 120" "$(redis TYPE "rl:http:u:$ID_E") $(redis ZCARD "rl:http:u:$ID_E")"
+# Public routes count against the socket peer's IP. Both halves are needed:
+# "no bucket for the forged address" alone also passes with no IP limiter.
+IP_KEYS() { redis --scan --pattern 'rl:http:ip:*' | grep -E '^rl:http:ip:(::1|127\.0\.0\.1)$'; }
+BEFORE=$(for k in $(IP_KEYS); do redis ZCARD "$k"; done | awk '{s+=$1} END {print s+0}')
+curl -s -o /dev/null -X POST "$GW/login" -H "$JSON" -H 'X-Forwarded-For: 203.0.113.9' -d '{}'
+AFTER=$(for k in $(IP_KEYS); do redis ZCARD "$k"; done | awk '{s+=$1} END {print s+0}')
+expect "a public request is counted in the peer IP's bucket" "$((BEFORE+1))" "$AFTER"
+expect "a forged X-Forwarded-For does not buy a fresh IP bucket" "0" "$(redis EXISTS 'rl:http:ip:203.0.113.9')"
+
+# The body is built outside $(...): bash 3.2 (macOS) mis-parses escaped
+# quotes inside a command substitution that is itself in double quotes.
+WRONG_BODY="{\"email\":\"nobody-rl-$SUFFIX@test.com\",\"password\":\"wrong\"}"
+CODES=""; for _ in 1 2 3 4 5 6; do req POST /login "" "$WRONG_BODY"; CODES="$CODES $STATUS"; done
+expect "6 wrong logins -> 5 x 401 then 429" "401 401 401 401 401 429" "${CODES# }"
+for _ in 1 2 3 4; do req POST /login "" "{\"email\":\"$EMAIL_D\",\"password\":\"wrong\"}"; done   # D logged in once above: 5 attempts
+req POST /login "" "{\"email\":\"$EMAIL_D\",\"password\":\"$PW\"}"
+expect "once spent, the RIGHT password is 429 too (no oracle)" "429" "$STATUS"
+expect "the login key holds no email address" "0" "$(redis --scan --pattern 'rl:login:*' | grep -c '@')"
+
+# E has spent its HTTP minute above; F is a fresh user for the socket checks.
+EMAIL_F="e2e-f-$SUFFIX@test.com"
+req POST /register "" "{\"email\":\"$EMAIL_F\",\"password\":\"$PW\"}"; ID_F=$(echo "$BODY" | jq -r .id)
+TOKEN_F=$(login "$EMAIL_F")
+req POST /documents "$TOKEN_F" '{"title":"Flood"}'; FDOC=$(echo "$BODY" | jq -r .id)
+# --flood obeys one-op-in-flight and sends the next op the moment it is
+# acked: far over 20/s, so the bucket (burst 40) is what stops it.
+OUT=$("$PROBE" --wait 1s --flood 100 "$WS?doc=$FDOC&ticket=$(ticket "$TOKEN_F")" 2>&1)
+expect "a client acking faster than 20 ops/s gets acks first" "yes" "$([ "$(echo "$OUT" | grep '^{' | jq -r 'select(.type=="ack") | .v' | wc -l | tr -d ' ')" -ge 40 ] && echo yes || echo no)"
+expect "100 ops as fast as acks allow -> rate_limited errors" "yes" "$(echo "$OUT" | grep '^{' | jq -r 'select(.type=="error") | .code' | grep -q rate_limited && echo yes || echo no)"
+expect "... then close 4429" "close 4429" "$(echo "$OUT" | grep '^close' | cut -d' ' -f1,2)"
+CURS=(); for i in $(seq 1 100); do CURS+=("{\"type\":\"cursor\",\"pos\":0,\"sel\":0}"); done
+OUT=$("$PROBE" --wait 500ms "$WS?doc=$FDOC&ticket=$(ticket "$TOKEN_F")" "${CURS[@]}" 2>&1)
+expect "100 cursor frames at once: dropped silently, socket stays open" "0 none" \
+  "$(echo "$OUT" | grep '^{' | jq -r 'select(.type=="error") | .code' | wc -l | tr -d ' ') $(echo "$OUT" | grep -q '^close 4' && echo closed || echo none)"
+# The cross-instance counter: spend F's minute in Redis, as ten sockets on
+# two instances would, and the next op closes whichever socket sends it.
+redis SET "rl:wsops:$ID_F" 600 EX 60 >/dev/null
+OUT=$("$PROBE" --wait 500ms "$WS?doc=$FDOC&ticket=$(ticket "$TOKEN_F")" '{"type":"op","v":0,"op":["y"],"seq":1}' 2>&1)
+expect "per-user op budget spent across instances -> close 4429" "close 4429" "$(echo "$OUT" | grep '^close' | cut -d' ' -f1,2)"
+redis DEL "rl:wsops:$ID_F" >/dev/null
+req DELETE "/documents/$FDOC" "$TOKEN_F"
+
+# ---- month 4: Redis down ----------------------------------------------------
+say "month 4: Redis down -> limiters fail open, cache bypassed"
+docker pause docs_redis >/dev/null
+R0=$(list_reads)
+req GET /documents "$TOKEN_A"
+expect "GET /documents still 200 with Redis paused" "200" "$STATUS"
+expect "... read from the database" "$((R0+1))" "$(list_reads)"
+expect "rate-limited user is admitted (fail open)" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$GW/me" -H "Authorization: Bearer $TOKEN_E")"
+req POST /login "" "{\"email\":\"$EMAIL_D\",\"password\":\"$PW\"}"
+expect "login limiter fails open too" "200" "$STATUS"
+expect "the gateway logged failing open" "yes" "$(grep -q 'failing open' "$LOG_DIR/gateway.log" && echo yes || echo no)"
+expect "doc-service logged the cache bypass" "yes" "$(cat "$LOG_DIR"/doc-*.log | grep -q 'doclist cache unavailable' && echo yes || echo no)"
+docker unpause docs_redis >/dev/null
+for _ in $(seq 1 20); do [ "$(redis PING 2>/dev/null)" = PONG ] && break; sleep 0.25; done
+req GET /documents "$TOKEN_A"; req GET /documents "$TOKEN_A"
+expect "cache serves again once Redis is back" "1" "$(redis EXISTS "doclist:$ID_A")"
 
 # ---- observability ---------------------------------------------------------
 say "observability"

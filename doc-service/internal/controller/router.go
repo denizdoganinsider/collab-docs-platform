@@ -24,6 +24,9 @@ type Dependencies struct {
 	// stops routing new connections here before the listener closes. nil
 	// means the process never drains (tests).
 	Draining *atomic.Bool
+	// Per-user list queries that reached the database (the cache's misses),
+	// reported on /health. nil omits it.
+	ListDBReads func() int64
 }
 
 // NewRouter wires every route. Only /health is reachable without the
@@ -51,7 +54,11 @@ func NewRouter(deps Dependencies) *echo.Echo {
 		if deps.Draining != nil && deps.Draining.Load() {
 			return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "draining", "instance": deps.InstanceID})
 		}
-		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "instance": deps.InstanceID})
+		body := map[string]any{"status": "ok", "instance": deps.InstanceID}
+		if deps.ListDBReads != nil {
+			body["list_db_reads"] = deps.ListDBReads()
+		}
+		return c.JSON(http.StatusOK, body)
 	})
 
 	// Route-level middleware rather than e.Group("", ...): an empty-prefix

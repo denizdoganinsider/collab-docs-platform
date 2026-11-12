@@ -250,6 +250,7 @@
     ws: null, docId: null, version: 0, content: [], role: 'viewer',
     state: 'sync', outstanding: null, buffer: null, seq: 0,
     cursors: new Map(), presence: [], backoff: 1000, retry: null, closing: false,
+    resend: null,
   };
   const ta = $('content');
   const canEdit = () => live.role === 'owner' || live.role === 'editor';
@@ -262,7 +263,7 @@
     live.content = apply(live.content, op);
     for (const [uid, c] of live.cursors) live.cursors.set(uid, { ...c, pos: transformPos(c.pos, op), sel: transformPos(c.sel, op) });
     switch (live.state) {
-      case 'sync': sendOp(op); live.state = 'await'; live.outstanding = op; break;
+      case 'sync': live.state = 'await'; live.outstanding = op; sendOutstanding(); break;
       case 'await': live.state = 'buffer'; live.buffer = op; break;
       case 'buffer': live.buffer = compose(live.buffer, op); break;
     }
@@ -284,10 +285,45 @@
     renderMeta(); renderCursors();
   }
 
+  // Ops leave at most every MIN_OP_GAP_MS, under the server's 20 ops/s
+  // bucket, so typing never trips the limiter; keystrokes in between are
+  // composed into the buffer as usual. If the server still answers
+  // rate_limited, it refused the outstanding op without applying it and no
+  // ack will come: the op stays outstanding (server ops keep transforming
+  // it), the buffer is folded in, and it is sent again after a pause.
+  // live.resend is the one pending send; while it is set the outstanding op
+  // has not been sent.
+  const MIN_OP_GAP_MS = 67;
+  const RESEND_AFTER_MS = 250;
+  let lastOpSent = 0;
+  function scheduleOutstanding(ms) {
+    const ws = live.ws;
+    live.resend = setTimeout(() => {
+      live.resend = null;
+      if (live.ws !== ws || live.state === 'sync') return;
+      lastOpSent = Date.now();
+      sendOp(live.outstanding);
+    }, ms);
+  }
+  function sendOutstanding() {
+    if (live.resend) return;
+    const wait = lastOpSent + MIN_OP_GAP_MS - Date.now();
+    if (wait > 0) { scheduleOutstanding(wait); return; }
+    lastOpSent = Date.now();
+    sendOp(live.outstanding);
+  }
+  function rateLimited() {
+    if (live.state === 'sync' || live.resend) return;
+    if (live.state === 'buffer') { live.outstanding = compose(live.outstanding, live.buffer); live.buffer = null; live.state = 'await'; }
+    scheduleOutstanding(RESEND_AFTER_MS);
+    renderSync();
+  }
+  function cancelResend() { if (live.resend) { clearTimeout(live.resend); live.resend = null; } }
+
   function serverAck(f) {
     live.version = f.v;
     if (live.state === 'await') { live.state = 'sync'; live.outstanding = null; }
-    else if (live.state === 'buffer') { live.state = 'await'; live.outstanding = live.buffer; live.buffer = null; sendOp(live.outstanding); }
+    else if (live.state === 'buffer') { live.state = 'await'; live.outstanding = live.buffer; live.buffer = null; sendOutstanding(); }
     if (cursorPending) sendCursor();
     renderMeta(); renderSync();
   }
@@ -333,7 +369,7 @@
     if (!live.ws || cursorTimer) return;
     cursorTimer = setTimeout(() => {
       cursorTimer = null;
-      if (live.state === 'buffer') { cursorPending = true; return; }
+      if (live.state === 'buffer' || live.resend) { cursorPending = true; return; }
       cursorPending = false;
       const pos = toCP(ta.value, ta.selectionStart), sel = toCP(ta.value, ta.selectionEnd);
       const key = pos + ':' + sel;
@@ -395,6 +431,7 @@
     if (live.retry) { clearTimeout(live.retry); live.retry = null; }
     if (live.ws) { const ws = live.ws; live.ws = null; ws.close(1000, 'leaving'); }
     live.docId = null; live.backoff = 1000;
+    cancelResend();
     live.state = 'sync'; live.outstanding = null; live.buffer = null;
     live.cursors.clear(); live.presence = [];
     conn('', 'offline');
@@ -405,6 +442,7 @@
       case 'snapshot': {
         const dropped = (live.outstanding ? 1 : 0) + (live.buffer ? 1 : 0);
         if (dropped) status(`reconnected: ${dropped} unacknowledged local edit${dropped > 1 ? 's were' : ' was'} dropped`, true);
+        cancelResend();
         live.state = 'sync'; live.outstanding = null; live.buffer = null; live.backoff = 1000;
         live.version = f.v; live.role = f.role; live.presence = f.presence || [];
         live.cursors.clear();
@@ -428,6 +466,7 @@
         loadDocs().catch(fail);
         break;
       case 'error':
+        if (f.code === 'rate_limited') { status('typing faster than the server accepts; retrying', true); rateLimited(); break; }
         status(`${f.code}: ${f.message}`, true);
         if (f.code === 'forbidden') {
           // The op was dropped server-side and no ack will come: fall back
