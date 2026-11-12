@@ -15,6 +15,7 @@ const (
 	CloseDeleted       = 4004
 	CloseProtocol      = 4400
 	CloseTooFarBehind  = 4409
+	CloseRateLimited   = 4429
 	reasonTooFarBehind = "too_far_behind"
 )
 
@@ -93,6 +94,12 @@ type errorFrame struct {
 	Type    string `json:"type"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// ErrorFrame is an error frame for code paths outside the session (the read
+// pump's rate limiter).
+func ErrorFrame(code, message string) []byte {
+	return encode(errorFrame{Type: TypeError, Code: code, Message: message})
 }
 
 // encode cannot fail for the frame structs above: they hold only strings,

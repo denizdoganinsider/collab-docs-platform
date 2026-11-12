@@ -30,6 +30,14 @@ type Config struct {
 	LBHealthIntervalSeconds int
 
 	StaticDir string
+
+	// Shared store of the rate limiters. Down means fail open.
+	RedisAddr string
+
+	// Requests per minute per user (per IP on public routes), and login
+	// attempts per minute per email and IP.
+	HTTPRateLimitPerMinute  int
+	LoginRateLimitPerMinute int
 }
 
 func LoadConfig() *Config {
@@ -42,6 +50,10 @@ func LoadConfig() *Config {
 		StaticDir:      getEnv("STATIC_DIR", "../static"),
 
 		LBHealthIntervalSeconds: positiveInt("LB_HEALTH_INTERVAL_SECONDS", 5),
+
+		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6381"),
+		HTTPRateLimitPerMinute:  positiveInt("RATE_LIMIT_PER_MINUTE", 120),
+		LoginRateLimitPerMinute: positiveInt("LOGIN_LIMIT_PER_MINUTE", 5),
 	}
 }
 

@@ -69,7 +69,7 @@ func init() { middleware.InitJWT("test") }
 // echoes the driver's internals.
 func TestAuthController_DatabaseDownIs500(t *testing.T) {
 	dbDown := errors.New("dial tcp 127.0.0.1:3308: connect: connection refused")
-	ac := NewAuthController(service.NewUserService(&stubRepo{err: dbDown}))
+	ac := NewAuthController(service.NewUserService(&stubRepo{err: dbDown}), nil)
 
 	for _, tt := range []struct {
 		name    string
@@ -113,7 +113,7 @@ func TestAuthController_ClientErrors(t *testing.T) {
 		{"deleted user on /me", &stubRepo{}, (*AuthController).Me, ``, map[string]any{middleware.UserIDKey: int64(1)}, 401},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ac := NewAuthController(service.NewUserService(tt.repo))
+			ac := NewAuthController(service.NewUserService(tt.repo), nil)
 			handler := func(c echo.Context) error { return tt.handler(ac, c) }
 			code, _ := call(t, handler, http.MethodPost, tt.body, tt.ctx)
 			if code != tt.wantCode {

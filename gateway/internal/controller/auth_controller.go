@@ -1,11 +1,18 @@
 package controller
 
 import (
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"collab-docs-platform/gateway/internal/middleware"
+	"collab-docs-platform/gateway/internal/ratelimit"
 	"collab-docs-platform/gateway/internal/service"
 
 	"github.com/labstack/echo/v4"
@@ -18,10 +25,32 @@ type credentialsRequest struct {
 
 type AuthController struct {
 	userService *service.UserService
+	// Brute-force guard on POST /login, keyed by email and client IP. nil
+	// disables it.
+	loginLimiter ratelimit.Limiter
 }
 
-func NewAuthController(userService *service.UserService) *AuthController {
-	return &AuthController{userService: userService}
+func NewAuthController(userService *service.UserService, loginLimiter ratelimit.Limiter) *AuthController {
+	return &AuthController{userService: userService, loginLimiter: loginLimiter}
+}
+
+// loginAllowed counts every attempt, right or wrong, before the password is
+// checked. Once the window is spent even the correct password gets 429, so
+// the answer never tells a guesser that a guess was right.
+func (ac *AuthController) loginAllowed(c echo.Context, email string) (ratelimit.Decision, bool) {
+	if ac.loginLimiter == nil {
+		return ratelimit.Decision{Allowed: true}, true
+	}
+	// Hashed so the limiter store never holds an email address.
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email)) + "|" + c.RealIP()))
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 250*time.Millisecond)
+	defer cancel()
+	decision, err := ac.loginLimiter.Allow(ctx, hex.EncodeToString(sum[:]))
+	if err != nil {
+		slog.Warn("rate limiter unavailable, failing open", "limiter", "login", "error", err)
+		return ratelimit.Decision{Allowed: true}, true
+	}
+	return decision, decision.Allowed
 }
 
 func (ac *AuthController) Register(c echo.Context) error {
@@ -50,6 +79,10 @@ func (ac *AuthController) Login(c echo.Context) error {
 
 	if req.Email == "" || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "email and password are required"})
+	}
+
+	if decision, ok := ac.loginAllowed(c, req.Email); !ok {
+		return ratelimit.TooManyRequests(c, decision.RetryAfter)
 	}
 
 	user, err := ac.userService.Login(req.Email, req.Password)

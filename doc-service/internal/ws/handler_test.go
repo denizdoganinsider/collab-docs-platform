@@ -132,7 +132,7 @@ func newHarnessWith(t *testing.T, gate chan struct{}) *harness {
 
 	e := echo.New()
 	e.Use(middleware.RequestIDMiddleware)
-	h := NewHandler(sessions, access, []string{origin}, maxBytes, "doc-test")
+	h := NewHandler(sessions, access, []string{origin}, maxBytes, "doc-test", DefaultLimits())
 	e.GET("/ws", h.Serve, middleware.GatewayAuth(testKey))
 	srv := httptest.NewServer(e)
 	t.Cleanup(func() {

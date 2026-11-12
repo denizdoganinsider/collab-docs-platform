@@ -34,6 +34,8 @@ type Client struct {
 	userID  int64
 	session *session.Session
 
+	limiter *frameLimiter
+
 	send    chan []byte
 	closing chan struct{}
 	once    sync.Once
@@ -41,10 +43,11 @@ type Client struct {
 	reason  string
 }
 
-func newClient(conn *websocket.Conn, userID int64) *Client {
+func newClient(conn *websocket.Conn, userID int64, lim Limits) *Client {
 	return &Client{
 		conn:    conn,
 		userID:  userID,
+		limiter: newFrameLimiter(lim, userID),
 		send:    make(chan []byte, sendBuffer),
 		closing: make(chan struct{}),
 	}
@@ -111,6 +114,18 @@ func (c *Client) readPump() {
 			}
 			return
 		}
+
+		switch c.admit(in.Type) {
+		case drop:
+			continue
+		case rateLimited:
+			c.Send(session.ErrorFrame("rate_limited", "too many ops; slow down"))
+			continue
+		case closeSocket:
+			c.Close(session.CloseRateLimited, "rate_limited")
+			return
+		}
+
 		if !c.session.Deliver(c, in) {
 			return
 		}
@@ -118,6 +133,18 @@ func (c *Client) readPump() {
 		// pong interval; a deadline set before it would now be stale.
 		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	}
+}
+
+// admit applies the frame limits. Only op and cursor frames are limited:
+// a ping is a heartbeat, and anything else is the session's to reject.
+func (c *Client) admit(frameType string) verdict {
+	switch frameType {
+	case session.TypeOp:
+		return c.limiter.op(time.Now())
+	case session.TypeCursor:
+		return c.limiter.cursor(time.Now())
+	}
+	return admit
 }
 
 // writePump is the only goroutine that writes to the socket: queued frames,

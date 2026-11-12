@@ -39,7 +39,7 @@ func serveWith(t *testing.T, store session.Store, access Access) *httptest.Serve
 	sessions := session.NewManager(store, session.DefaultLimits())
 	e := echo.New()
 	e.Use(middleware.RequestIDMiddleware)
-	e.GET("/ws", NewHandler(sessions, access, []string{origin}, maxBytes, "doc-test").Serve, middleware.GatewayAuth(testKey))
+	e.GET("/ws", NewHandler(sessions, access, []string{origin}, maxBytes, "doc-test", DefaultLimits()).Serve, middleware.GatewayAuth(testKey))
 	srv := httptest.NewServer(e)
 	t.Cleanup(srv.Close)
 	return srv

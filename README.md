@@ -213,7 +213,7 @@ collab-docs-platform/
 ├── docker-compose.yml            mysql:8 (3308) + redis:7 (6381); month 6 adds the services
 ├── Makefile                      vet, test, test-db, e2e, check
 ├── scripts/
-│   └── e2e.sh                    end-to-end test over real HTTP and WebSocket (104 checks)
+│   └── e2e.sh                    end-to-end test over real HTTP and WebSocket (~165 checks)
 ├── docs/                         the shareable six-month plan (proje-plani.html / .pdf, Turkish)
 ├── db/
 │   ├── gateway_schema.sql        docs_gateway_db
@@ -231,14 +231,15 @@ collab-docs-platform/
 │       ├── repository/           user_repository (raw SQL)
 │       ├── domain/               User
 │       ├── validation/           email + password policy
-│       ├── middleware/           jwt, admin, request_id, logger, ws_ticket (m2), rate_limit (m4)
+│       ├── middleware/           jwt, admin, request_id, logger, ws_ticket (m2)
+│       ├── ratelimit/            sliding window log, fixed window, 429 middleware (m4)
 │       ├── proxy/                trusted_proxy, balanced_proxy (m3)
 │       ├── loadbalancer/         strategy, round_robin, consistent_hash, pool (m3)
 │       └── edgecache/            byte-bounded LRU + handler (m6)
 ├── doc-service/
 │   ├── cmd/doc/main.go
 │   ├── cmd/wsprobe/main.go       verification WebSocket client (stands in for websocat; used by e2e.sh)
-│   ├── config/
+│   ├── config/                   env parsing, MySQL, Redis (m4)
 │   └── internal/
 │       ├── controller/           document, member, router (shared by main and the matrix test), ops (m2)
 │       ├── service/              document_service, member_service, cache (m4), outbox_relay (m5)
@@ -247,7 +248,7 @@ collab-docs-platform/
 │       ├── middleware/           gateway_auth, request_id, logger, instance (m3)
 │       ├── ot/                   operation, apply, compose, transform  (+ exhaustive tests) (m2)
 │       ├── session/              per-document Session goroutine, op ring, writer, snapshotter (m2)
-│       ├── ws/                   handler (membership, Origin, upgrade), client (read/write pumps) (m2)
+│       ├── ws/                   handler (membership, Origin, upgrade), client (read/write pumps) (m2), frame limiters (m4)
 │       └── dispatch/             bounded non-blocking queues (copied pattern) (m5)
 ├── notification-service/         (month 5) same layering; deliverer, signer, ssrf, fanout
 └── publish-service/              (month 6) render (goldmark), storage (content-addressed), slug map
@@ -1288,78 +1289,177 @@ Known trade-offs, carried from the chat project and stated here on purpose:
   default poll interval. A deployment that shortens the drain below the poll
   interval reintroduces the window the ordering closes.
 
-### Month 4 — January 2027 — Caching (Redis) + Rate Limiting *(planned)*
+### Month 4 — January 2027 — Caching (Redis) + Rate Limiting *(done, ahead of schedule: 12 November 2026)*
 
-Goal: Redis enters for the two concepts that need a shared store across N
+Goal was: Redis enters for the two concepts that need a shared store across N
 instances. Both were done in `notification-api`; both are re-done here in the
-form the multi-instance system forces.
+form the multi-instance system forces. That is what exists: the per-user
+document list is served from Redis and invalidated from whichever instance
+made the change, and four limiters guard the HTTP edge, the login form and
+the WebSocket op stream. Redis going away degrades all of it to "no cache, no
+limits" with a log line, never to an error.
 
-**Caching** — `GET /documents` (the per-user list) is the hot read: the editor
-polls it, and it joins `document_members` with `documents`. Cache in Redis:
+What was built:
 
-```
-doclist:<user_id>   value = JSON of the first page   TTL = 300 s
-```
+1. **Redis client in both services** (`config/redis.go`, `REDIS_ADDR`,
+   default `localhost:6381`). 200 ms dial/read/write timeouts, no retries,
+   and a ping at boot before the listener opens, so the first request never
+   pays for the dial inside its own timeout. The client never makes the
+   process exit: a Redis that is down at boot is a degraded start.
+2. **Document-list cache** (`doc-service/internal/service/cache.go`):
 
-- Read-through on the round-robined list endpoint; write-through invalidation
-  (`DEL`) on: document create/delete/rename (the owner's key and every member's),
-  member add/remove (that member's key), and on **every snapshot** (because the
-  list is sorted by `updated_at`, and `updated_at` moves when the snapshot
-  lands — not on every op). The lesson: pick the granularity at which the cached
-  view is *allowed* to be stale, and name it. Here: a document's position in the
-  list may lag its last edit by up to `SNAPSHOT_EVERY_SECONDS`.
-- Why Redis and not in-process: the instance that changes a membership
-  (hash-routed on the doc) is not the instance that serves the next list read
-  (round-robined). An in-process cache would need a cross-instance invalidation
-  bus, which is a message queue in disguise. A shared cache moves the problem to
-  one `DEL`.
-- Cache miss stampede is *not* handled (single-flight would be the fix); named as a
-  trade-off. Cache **the empty list** too (negative caching), otherwise a new user
-  with no documents is a database read per poll.
-- `presence` is deliberately not in Redis (see Architecture); the ticket store
-  stays in-memory in the single gateway.
+   ```
+   doclist:<user_id>   value = JSON of the first page (page 1, per_page 20)   TTL = DOCLIST_CACHE_TTL_SECONDS (300)
+   ```
 
-**Rate limiting** — three limiters, three shapes:
+   - Read-through in `DocumentService.List`. Other pages and sizes are read
+     straight from the database: they are rare, and caching them would mean
+     invalidating a key family instead of one key.
+   - **The empty list is cached too** (negative caching). Without it a user
+     with no documents costs a database read on every poll.
+   - **A Redis error is not a miss.** `Get` returns `(docs, hit, err)`; on an
+     error the read goes to the database and nothing is written back to the
+     cache that just failed.
+   - Invalidation (`DEL`, after the database write has committed):
+     | Write | Keys dropped |
+     |---|---|
+     | create | the owner's |
+     | rename | every member's (owner included) |
+     | delete | every member's, **read before the delete** (the members rows go with the document) |
+     | member add / re-role / remove | that member's |
+     | **snapshot** | every member's, through `service.InvalidatingStore`, a wrapper around the session store |
 
-| Where | Key | Algorithm | Limit | On exceed |
-|---|---|---|---|---|
-| gateway, all authenticated HTTP | `user_id` (IP for public routes) | **sliding window log** in Redis, one Lua script (`ZADD`/`ZREMRANGEBYSCORE`/`ZCARD`/`EXPIRE` atomically) | 120/min | `429` + `Retry-After` |
-| gateway, `POST /login` | `email` + IP | fixed window (INCR/EXPIRE, the notification-api port) | 5/min | `429`; the failure is the same for wrong password and rate-limited to avoid an enumeration oracle |
-| doc-service, WebSocket `op` frames | per connection | **token bucket** in memory (`golang.org/x/time/rate`) | 20/s, burst 40 | `error{code:"rate_limited"}`; three in 10 s → close 4429 |
-| doc-service, WebSocket `op` frames | `user_id` across connections/instances | Redis INCR per minute | 600/min | close 4429 |
+     The snapshot rule is the one that names the staleness this cache
+     allows: the list is sorted by `updated_at`, which moves when a snapshot
+     lands and not on every op. **A document's position in a list may lag
+     its last edit by up to one snapshot interval** (`SNAPSHOT_EVERY_SECONDS`,
+     or the last socket leaving).
+   - Why Redis and not in-process: the instance that changes a membership
+     (hash-routed on the document) is not the instance that serves the next
+     list read (round-robined). An in-process cache would need a
+     cross-instance invalidation bus, which is a message queue in disguise.
+     A shared cache turns that into one `DEL`. The e2e proves it: the share
+     is written on the document's instance and the member's next list read,
+     on either instance, shows the document.
+   - doc-service `/health` reports `list_db_reads`, the per-user list queries
+     that reached the database, so "N requests, 1 database read" is
+     measurable from outside.
+3. **Gateway HTTP limiter** (`gateway/internal/ratelimit/`): a **sliding
+   window log** in one Lua script (`ZREMRANGEBYSCORE` / `ZCARD` / `ZADD` /
+   `PEXPIRE`, atomic), `RATE_LIMIT_PER_MINUTE=120`. The score is the Redis
+   server clock (`TIME` inside the script), so gateways with drifting clocks
+   share one timeline. A refused request is not logged into the set, so
+   hammering does not extend the lockout. Keyed on the validated `user_id`
+   for every authenticated route (it runs after the JWT check, so an invalid
+   token is a free 401), on the client IP for `/register` and `/login`.
+   Answer: `429 {"error":"rate limit exceeded"}` with `Retry-After` in whole
+   seconds, rounded up, at least 1.
+   - The client IP is now the socket peer (`e.IPExtractor = echo.ExtractIPDirect()`).
+     Echo's default believes a client-supplied `X-Forwarded-For`, and an IP
+     limiter keyed on that is one header away from a fresh bucket per
+     request. The gateway is the public edge with nothing trusted in front of
+     it; the request log's `ip` field changed with it.
+4. **Login limiter**: a fixed window, `LOGIN_LIMIT_PER_MINUTE=5` per
+   `email + IP`. The `INCR` and the `PEXPIRE` are one Lua script, which also
+   restores a TTL a key has somehow lost: the notification-api port did them
+   as two commands, and a counter that is created without its expiry never
+   resets and locks its key out for good (prevention rule SD-154318). Every
+   attempt counts, right or wrong, *before* the password is checked, so once
+   the window is spent **the correct password gets the same 429** as a wrong
+   one: the answer never confirms a guess. The key is a SHA-256 of the
+   normalised email and the IP, so Redis never holds an address.
+5. **WebSocket limiters** (`doc-service/internal/ws/limiter.go`), applied in
+   the read pump before a frame reaches the session:
+   - `op` frames: a **token bucket per connection** in memory
+     (`golang.org/x/time/rate`), `WS_OPS_PER_SECOND=20`, `WS_OPS_BURST=40`.
+     Over the rate: `{"type":"error","code":"rate_limited"}` and the frame is
+     not delivered; the third within 10 s closes the socket with **4429**.
+   - `op` frames: a **per-user counter across connections and instances**,
+     Redis `INCR` + `PEXPIRE` in one script, `WS_OPS_PER_MINUTE_PER_USER=600`;
+     over it, close 4429. A frame the local bucket already refused is not
+     counted.
+   - `cursor` frames over 20/s are **dropped silently**: a cursor is
+     cosmetic, and a client that sends too many loses cursor fidelity, not
+     access.
+   - Why the per-connection limiter is in-process: the connection lives on
+     one instance, and a Redis round trip per keystroke would put Redis on
+     the ack path. The per-user counter does sit on it, bounded to 100 ms and
+     failing open past that; it exists for the case the in-process one cannot
+     see - the same user on ten connections across instances.
+6. **Fail open everywhere.** A limiter whose Redis call errors or times out
+   (250 ms on the gateway, 100 ms per op) admits the request and logs
+   `rate limiter unavailable, failing open`; the cache logs
+   `doclist cache unavailable, reading the database` and serves from MySQL.
 
-- Sliding window vs the predecessor's fixed window: a fixed 60 s window admits 2×
-  the limit across a boundary; the log shape does not, at the cost of O(limit)
-  memory per key. Measure and write both numbers down.
-- Why the WebSocket limiter is in-process: it is per connection, the connection is
-  on one instance, and a Redis round trip per keystroke would put Redis on the
-  ack path. The per-user Redis counter exists for the case the in-process one
-  cannot see — the same user on ten connections across instances.
-- `cursor` frames are dropped over 20/s silently rather than counted: they are
-  cosmetic, and a client that sends too many loses cursor fidelity, not access.
+`cmd/wsprobe` gained `--flood N`: a client that obeys one-op-in-flight and
+sends the next op the moment it is acked. A burst of raw frames is stopped by
+the session's protocol check (`4400 second op before ack`) long before any
+rate limit; a fast but well-behaved client is what the bucket is for.
 
-Verification:
+Measured (Redis 7, `MEMORY USAGE`): a sliding-window key at the 120 limit is
+**5 168 bytes** (listpack encoding, about 43 bytes per admitted request); a
+fixed-window counter is **48 bytes**. So the log shape costs about 100x the
+memory per active user, in exchange for never admitting more than the limit
+in any 60 s span - a fixed 60 s window admits up to 2x the limit across a
+boundary. 120 also stays under Redis' 128-entry listpack threshold: at 480
+entries the same set converts to a skiplist and weighs 50 968 bytes (about
+106 bytes per entry), so raising the limit past 128 more than doubles the
+per-request cost.
+
+Verification (`./scripts/e2e.sh` runs all of this unattended - 164-166 checks
+for months 1-4, including Redis paused mid-run (the month-3 stickiness loop
+creates documents until both instances hold one, so the count moves by a
+few); by hand with the services from
+`Running locally`, `PROBE="go run ./cmd/wsprobe"` from `doc-service/`):
 
 ```bash
 # cache
 curl -s localhost:9000/documents -H "Authorization: Bearer $TOKEN_A" >/dev/null
-docker exec docs_redis redis-cli --scan --pattern 'doclist:*'          # doclist:1
-curl -s -X PUT localhost:9000/documents/$DOC/members/2 ... -d '{"role":"editor"}'
-docker exec docs_redis redis-cli EXISTS doclist:2                       # 0 — invalidated on the other instance
-# query log or a counter on /health: N list requests, 1 database read
+docker exec docs_redis redis-cli --scan --pattern 'doclist:*'          # doclist:<A>
+curl -s -X PUT localhost:9000/documents/$DOC/members/$ID_B -H "Authorization: Bearer $TOKEN_A" -H "$JSON" -d '{"role":"editor"}'
+docker exec docs_redis redis-cli EXISTS doclist:$ID_B                   # 0 - invalidated on the document's instance
+curl -s localhost:9001/health; curl -s localhost:9011/health            # list_db_reads: 6 more list reads, 0 more database reads
 
 # rate limit
 for i in $(seq 1 130); do curl -s -o /dev/null -w '%{http_code}\n' localhost:9000/me -H "Authorization: Bearer $TOKEN_A"; done | sort | uniq -c
-# => 120 × 200, 10 × 429
-websocat ... then paste 100 op frames in one go => rate_limited errors, then close 4429
+# => 120 × 200, 10 × 429 (with Retry-After)
+$PROBE --flood 100 "ws://localhost:9000/ws?doc=$DOC&ticket=$T" | tail -3
+# => acks, then {"type":"error","code":"rate_limited",...} ×3, then close 4429 rate_limited
 for i in $(seq 1 6); do curl -s -X POST localhost:9000/login -H "$JSON" -d '{"email":"a@test.com","password":"wrong"}' -w ' %{http_code}\n'; done
-# => 5 × 401, then 429
+# => 5 × 401, then 429 - and the right password is 429 too until the window ends
+
+# fail open
+docker pause docs_redis
+curl -s -o /dev/null -w '%{http_code}\n' localhost:9000/documents -H "Authorization: Bearer $TOKEN_A"   # 200, from MySQL
+docker unpause docs_redis
 ```
 
-Exit criteria: list reads hit Redis; invalidation crosses instances; all four
-limiters demonstrably fire; Redis down → limiters **fail open** with a log line
-(availability over strictness for a learning system — named as a trade-off) and
-the cache is bypassed.
+Exit criteria - all met: list reads hit Redis (`list_db_reads` does not move
+over repeated reads); invalidation crosses instances; all four limiters fire
+in the e2e (the cross-instance counter by spending a user's minute in Redis
+first, as ten sockets would); with Redis paused the limiters fail open with a
+log line and the cache is bypassed; the cache serves again once Redis is
+back.
+
+Known trade-offs, stated here on purpose:
+
+- **Availability over strictness.** Redis down means no rate limits at all.
+  For a learning system that is the right side to fail on; a system whose
+  limits protect money or third-party quotas would fail closed, or fall back
+  to an in-process limiter per instance.
+- **Invalidation races are bounded by the TTL, not prevented.** A read that
+  misses, loads the old list, and writes it back *after* a concurrent write's
+  `DEL` leaves that list stale for up to 300 s. A failed `DEL` (Redis blip
+  after the commit) does the same. Versioned keys or a short TTL on a
+  write-back would close it; neither is worth it for a list view.
+- **No stampede protection.** N simultaneous misses for one user are N
+  database reads (single-flight would be the fix). Per-user keys keep N
+  small.
+- **The per-user WebSocket counter is a fixed window**, so a user can send up
+  to 1 200 ops across a minute boundary. It is the backstop behind the 20/s
+  per-connection bucket, not the main limit.
+- `presence` is still not in Redis, and the ticket store stays in-memory in
+  the single gateway (see Architecture).
 
 ### Month 5 — February 2027 — Webhooks *(planned)*
 
@@ -1560,7 +1660,9 @@ transform case is unclear; do not import them.
 
 ## Running locally
 
-Valid as of month 3; later months add processes as listed in their sections.
+Valid as of month 4 (Redis is used from month 4; without it the cache is
+bypassed and the limiters fail open); later months add processes as listed in
+their sections.
 
 ```bash
 # 1. MySQL (four schemas, two exist in month 1) + Redis
@@ -1629,7 +1731,7 @@ docker compose down -v && docker compose up -d                             # or 
 
 ```bash
 make test                      # go test ./gateway/... ./doc-service/... -race (database tests skip)
-make test-db                   # same, with DOCS_TEST_DSN pointing at the compose MySQL (permission matrix runs)
+make test-db                   # same, with DOCS_TEST_DSN and DOCS_TEST_REDIS pointing at the compose MySQL and Redis (permission matrix, limiter scripts, cache round trips run; Redis tests use database 15)
 make e2e                       # ./scripts/e2e.sh: both services + real HTTP + WebSocket (cmd/wsprobe) + kill -9 + log assertions
 make check                     # vet + test-db + e2e
 go test ./doc-service/internal/session/ -race -count=1             # session: fake store + fake clients, incl. 2 000 random stale ops folded against the log (200 with -short)

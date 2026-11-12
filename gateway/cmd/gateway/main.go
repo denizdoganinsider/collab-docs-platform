@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"collab-docs-platform/gateway/internal/controller"
 	"collab-docs-platform/gateway/internal/loadbalancer"
 	"collab-docs-platform/gateway/internal/proxy"
+	"collab-docs-platform/gateway/internal/ratelimit"
 	"collab-docs-platform/gateway/internal/repository"
 	"collab-docs-platform/gateway/internal/service"
 
@@ -32,9 +34,27 @@ func main() {
 	db := config.NewDatabase(cfg.DBDSN)
 	defer db.Close()
 
+	rdb := config.NewRedis(cfg.RedisAddr)
+	defer rdb.Close()
+
+	// The sliding window log for everything, the cheaper fixed window for
+	// the login guard, where a 2x burst across a boundary is 10 guesses,
+	// not a capacity problem.
+	httpLimiter := ratelimit.NewSlidingWindow(rdb, "rl:http:", cfg.HTTPRateLimitPerMinute, time.Minute)
+	loginLimiter := ratelimit.NewFixedWindow(rdb, "rl:login:", cfg.LoginRateLimitPerMinute, time.Minute)
+	limitByUser := ratelimit.Middleware("http-user", httpLimiter, func(c echo.Context) string {
+		if id, ok := c.Get(gatewayMiddleware.UserIDKey).(int64); ok {
+			return "u:" + strconv.FormatInt(id, 10)
+		}
+		return ""
+	})
+	limitByIP := ratelimit.Middleware("http-ip", httpLimiter, func(c echo.Context) string {
+		return "ip:" + c.RealIP()
+	})
+
 	userRepo := repository.NewUserRepository(db)
 	userService := service.NewUserService(userRepo)
-	authController := controller.NewAuthController(userService)
+	authController := controller.NewAuthController(userService, loginLimiter)
 	adminController := controller.NewAdminController(userService)
 	tickets := service.NewTicketService()
 	defer tickets.Close()
@@ -63,6 +83,11 @@ func main() {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	// The gateway is the public edge with nothing trusted in front of it, so
+	// the client is the socket peer. Echo's default would believe a
+	// client-supplied X-Forwarded-For, and a limiter keyed on that is one
+	// header away from a fresh bucket per request.
+	e.IPExtractor = echo.ExtractIPDirect()
 	// Slowloris and idle-keepalive bounds. No WriteTimeout: it would cut
 	// long-lived proxied streams (WebSocket, month 2).
 	e.Server.ReadHeaderTimeout = 10 * time.Second
@@ -82,8 +107,8 @@ func main() {
 	}
 	e.File("/", editorPath)
 
-	e.POST("/register", authController.Register)
-	e.POST("/login", authController.Login)
+	e.POST("/register", authController.Register, limitByIP)
+	e.POST("/login", authController.Login, limitByIP)
 
 	// Everything below validates the Bearer token here, once. This is the
 	// only JWT validator in the system; backends get identity headers.
@@ -91,10 +116,12 @@ func main() {
 	// Route-level middleware rather than e.Group("", ...): an Echo group with
 	// an empty prefix registers catch-all handlers for "/" and "/*" that
 	// would shadow GET / above and turn every unknown path into a 401.
-	user := []echo.MiddlewareFunc{gatewayMiddleware.JWTMiddleware}
+	// The user limiter runs after the token check: it is keyed on the
+	// validated user id, and an invalid token is a 401 that costs nothing.
+	user := []echo.MiddlewareFunc{gatewayMiddleware.JWTMiddleware, limitByUser}
 	// Admin routes are user routes that additionally require role=admin in
 	// the token, checked before anything is proxied.
-	admin := []echo.MiddlewareFunc{gatewayMiddleware.JWTMiddleware, gatewayMiddleware.AdminMiddleware}
+	admin := []echo.MiddlewareFunc{gatewayMiddleware.JWTMiddleware, limitByUser, gatewayMiddleware.AdminMiddleware}
 
 	e.GET("/me", authController.Me, user...)
 	e.POST("/ws-ticket", ticketController.Issue, user...)
